@@ -160,7 +160,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   refreshEntitlement: async () => {
-    // Dev builds (`tauri dev`/`make dev`) don't get the official RDSQL_API_BASE
+    // Dev builds (`tauri dev`/`make dev`) don't get the official RDSQL_CLIENT_KEY
     // build-time config (see Makefile's API_ENV), so cloud is never configured
     // there — skip before touching the Keychain at all. This also matters
     // because every `cargo run` re-signs the binary with a fresh ad-hoc

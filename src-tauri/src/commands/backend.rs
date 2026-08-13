@@ -21,18 +21,32 @@ use tokio::sync::Mutex;
 
 use super::storage;
 
-// Not hardcoded, and not defaulted to the official backend: a plain
-// `cargo build`/`make build` from the public source produces a build with
-// cloud features (sign-in, sync, entitlement) disabled — see
-// `is_cloud_configured`. Only the maintainer's official release build sets
-// these, from a local, gitignored-by-location env file outside the repo
+// The backend URL isn't sensitive — it's visible in any network trace or
+// `strings` on the binary regardless of how it gets in — so it's just
+// hardcoded rather than injected. What still varies per build is
+// RDSQL_CLIENT_KEY: a plain `cargo build`/`make build` from the public
+// source leaves it unset, which disables cloud features (sign-in, sync,
+// entitlement) entirely — see `backend_is_cloud_configured` below. Only the
+// maintainer's official release build sets it, from a local,
+// gitignored-by-location env file outside the repo
 // (`~/.tauri/rdsql-desktop.official.env`, loaded by the Makefile's
-// `OFFICIAL_ENV`/`API_ENV`, same pattern as the updater signing key).
-const API_BASE: &str = match option_env!("RDSQL_API_BASE") {
-    Some(v) => v,
-    None => "",
-};
-const WEB_BASE: &str = match option_env!("RDSQL_WEB_BASE") {
+// `OFFICIAL_ENV`/`API_ENV`, same pattern as the updater signing key; see
+// `make backend-secrets` for CI).
+//
+// IMPORTANT: RDSQL_CLIENT_KEY is not a secret in any cryptographic sense.
+// Once compiled into a public, downloadable binary it's just as extractable
+// as the URL above — build-time injection only stops it from sitting in the
+// committed source, it does nothing to hide it from someone examining the
+// resulting binary. Its only purpose is to stop a *casual* self-built copy
+// from silently talking to production as if it were official; it is not,
+// and cannot be, a real access-control boundary. The actual security
+// boundary is server-side: authenticate the signed-in *user*
+// (`backend_open_login` below, tokens in the OS keyring), not the binary
+// calling in. Treat a leaked/rotated key as a minor hygiene issue, not an
+// incident.
+const API_BASE: &str = "https://rdsql.com/api";
+const WEB_BASE: &str = "https://rdsql.com";
+const CLIENT_KEY: &str = match option_env!("RDSQL_CLIENT_KEY") {
     Some(v) => v,
     None => "",
 };
@@ -41,11 +55,11 @@ pub const REFRESH_TOKEN_KEY: &str = "rdsql_session_refresh_token";
 
 #[tauri::command]
 pub fn backend_is_cloud_configured() -> bool {
-    !API_BASE.is_empty()
+    !CLIENT_KEY.is_empty()
 }
 
 fn require_cloud_configured() -> Result<(), String> {
-    if API_BASE.is_empty() {
+    if CLIENT_KEY.is_empty() {
         return Err("Cloud features (sign-in, sync, entitlement) aren't available in this build.".to_string());
     }
     Ok(())
@@ -81,9 +95,22 @@ fn current_device_descriptor() -> DeviceDescriptor {
     }
 }
 
+/// Every request built from this client carries `x-rdsql-client-key` when
+/// RDSQL_CLIENT_KEY is set, so this is the one place that needs to know
+/// about it — every call site below (`send`, `refresh_access_token`,
+/// `backend_redeem_pairing_code`, `backend_analytics_event`) gets it for
+/// free. See the module-level comment on RDSQL_CLIENT_KEY: this header is a
+/// soft anti-abuse signal, not an access-control mechanism.
 fn client() -> Result<reqwest::Client, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if !CLIENT_KEY.is_empty() {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(CLIENT_KEY) {
+            headers.insert("x-rdsql-client-key", v);
+        }
+    }
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .default_headers(headers)
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))
 }
@@ -321,7 +348,7 @@ pub async fn backend_sync_push_credentials(
 
 #[tauri::command]
 pub async fn backend_analytics_event(install_id: String, event_name: String, dimension: String) -> Result<(), String> {
-    if API_BASE.is_empty() {
+    if CLIENT_KEY.is_empty() {
         return Ok(());
     }
     let url = format!("{}/analytics/event", API_BASE);

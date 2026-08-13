@@ -123,33 +123,38 @@ npx tauri signer generate -w ~/.tauri/rdsql-desktop.key
 
 ### Connecting official releases to rdsql.com
 
-Cloud sign-in, sync, and entitlement are compile-time-gated by two env vars
-read via `option_env!` in `src-tauri/src/commands/backend.rs`:
-`RDSQL_API_BASE` / `RDSQL_WEB_BASE`. Unset (the default for any clone-and-build,
-including forks and PR/branch CI in `ci.yml`), `backend_is_cloud_configured()`
-returns `false` and the build ships fully functional with cloud features
-simply off — nothing else in the app depends on them.
+`API_BASE`/`WEB_BASE` in `src-tauri/src/commands/backend.rs` are hardcoded to
+`https://rdsql.com/...` — they're plain URLs, extractable from any network
+trace or `strings` on the binary regardless of how they get in, so there's no
+point injecting them. What's compile-time-gated is `RDSQL_CLIENT_KEY` (read
+via `option_env!`): unset (the default for any clone-and-build, including
+forks and PR/branch CI in `ci.yml`), `backend_is_cloud_configured()` returns
+`false` and the build ships fully functional with cloud features simply off
+— nothing else in the app depends on it.
 
-Local maintainer builds pick these up automatically from `OFFICIAL_ENV`
+Local maintainer builds pick it up automatically from `OFFICIAL_ENV`
 (`~/.tauri/rdsql-desktop.official.env`, outside the repo — one `KEY=VALUE`
-per line, e.g. `RDSQL_API_BASE=https://rdsql.com/api`). **CI-built releases
-need the same two values as GitHub Secrets**, or `release.yml` builds them
-unset and every downloadable release ships cloud-disabled even though your
-local `make release` doesn't:
+per line, e.g. `RDSQL_CLIENT_KEY=<value>`). **CI-built releases need the same
+value as a GitHub Secret**, or `release.yml` builds it unset and every
+downloadable release ships cloud-disabled even though your local
+`make release` doesn't:
 
 ```bash
-make backend-secrets      # uploads RDSQL_API_BASE / RDSQL_WEB_BASE from ~/.tauri/rdsql-desktop.official.env
+make backend-secrets      # uploads RDSQL_CLIENT_KEY from ~/.tauri/rdsql-desktop.official.env
 ```
 
-These aren't credentials — they're plain URLs, extractable from network
-traffic or the compiled binary by anyone regardless of how they're stored in
-CI. Keeping them out of the committed source and out of fork/PR builds isn't
-about hiding them; it's so a self-compiled build from a random fork doesn't
-silently start talking to the production backend as if it were official. The
-actual security boundary is server-side: `backend_open_login`'s OAuth/device-
-pairing flow authenticates the signed-in *user* (tokens in the OS keyring),
-and billing/entitlement/abuse checks should key off that authenticated user,
-not off which binary is calling.
+**`RDSQL_CLIENT_KEY` is not a real secret.** Once compiled into a public,
+downloadable binary it's just as extractable as the URL above — keeping it
+out of the committed source and out of fork/PR builds isn't about hiding it,
+it's so a self-compiled build from a random fork doesn't silently start
+talking to the production backend as if it were official. That's a soft
+anti-abuse signal, not access control: it stops *casual* impersonation, not
+a determined one. The actual security boundary is server-side:
+`backend_open_login`'s OAuth/device-pairing flow authenticates the signed-in
+*user* (tokens in the OS keyring), and billing/entitlement/abuse checks
+should key off that authenticated user, not off which binary is calling. If
+the key ever leaks, rotate it (`make backend-secrets` again with a new
+value) and treat it as hygiene, not an incident.
 
 ---
 

@@ -20,7 +20,7 @@
 #   make release-watch     — list recent release runs
 #   make release-publish   — flip the resulting draft Release to public
 #   make updater-secrets   — one-time: push the signing key to GitHub Secrets
-#   make backend-secrets   — one-time: push RDSQL_API_BASE/RDSQL_WEB_BASE to GitHub Secrets
+#   make backend-secrets   — one-time: push RDSQL_CLIENT_KEY to GitHub Secrets
 #
 # Note: `release` builds locally for THIS machine only. `publish` is what
 # produces the cross-platform installers via CI.
@@ -56,13 +56,13 @@ UNAME_S := $(shell uname -s)
 UPDATER_KEY ?= $(HOME)/.tauri/rdsql-desktop.key
 SIGN_ENV = $(if $(wildcard $(UPDATER_KEY)),TAURI_SIGNING_PRIVATE_KEY="$$(cat $(UPDATER_KEY))" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}",)
 
-# Official backend config (RDSQL_API_BASE / RDSQL_WEB_BASE). Same pattern as
-# the signing key above: a plain `git clone && make build` produces a
-# community binary with cloud sign-in/sync disabled (see backend.rs's
-# `require_cloud_configured`) because this file doesn't exist for anyone but
-# the maintainer. Format: one KEY=VALUE per line, e.g.
-#   RDSQL_API_BASE=https://rdsql.com/api
-#   RDSQL_WEB_BASE=https://rdsql.com
+# Official backend config (RDSQL_CLIENT_KEY). Same pattern as the signing
+# key above: a plain `git clone && make build` produces a community binary
+# with cloud sign-in/sync disabled (see backend.rs's `require_cloud_configured`)
+# because this file doesn't exist for anyone but the maintainer. The backend
+# URLs themselves are hardcoded in backend.rs — not sensitive, not
+# configurable here. Format: one KEY=VALUE per line, e.g.
+#   RDSQL_CLIENT_KEY=<value>
 OFFICIAL_ENV ?= $(HOME)/.tauri/rdsql-desktop.official.env
 API_ENV = $(if $(wildcard $(OFFICIAL_ENV)),$(shell grep -E '^[A-Z_]+=' $(OFFICIAL_ENV) | awk -F= '{printf "%s=\"%s\" ", $$1, $$2}'),)
 
@@ -260,12 +260,11 @@ updater-secrets: check-gh ## Upload the updater signing key to GitHub Secrets
 # Without this, GitHub Actions-built releases ship with cloud features
 # disabled even though your local `make release` (which reads OFFICIAL_ENV
 # directly) has them on.
-backend-secrets: check-gh ## Upload RDSQL_API_BASE / RDSQL_WEB_BASE (from OFFICIAL_ENV) to GitHub Secrets
+backend-secrets: check-gh ## Upload RDSQL_CLIENT_KEY (from OFFICIAL_ENV) to GitHub Secrets
 	@test -f "$(OFFICIAL_ENV)" || { \
 		echo "Official backend config not found at $(OFFICIAL_ENV)."; \
 		echo "Create it with one KEY=VALUE per line, e.g.:"; \
-		echo "  RDSQL_API_BASE=https://rdsql.com/api"; \
-		echo "  RDSQL_WEB_BASE=https://rdsql.com"; \
+		echo "  RDSQL_CLIENT_KEY=<value>"; \
 		exit 1; \
 	}
 	@grep -E '^[A-Z_]+=' "$(OFFICIAL_ENV)" | while IFS='=' read -r key val; do \

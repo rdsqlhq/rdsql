@@ -13,12 +13,15 @@ Open source under the MIT License (see `LICENSE`).
 
 ## Optional cloud backend
 
-`src-tauri/src/commands/backend.rs` talks to an optional rdSQL backend (accounts, device
-pairing, encrypted sync, entitlement) via two compile-time env vars, `RDSQL_API_BASE` /
-`RDSQL_WEB_BASE` (see `.env.example`). A plain `git clone && make build` leaves both unset, which
+`src-tauri/src/commands/backend.rs` talks to the rdSQL backend (accounts, device pairing,
+encrypted sync, entitlement) at hardcoded URLs (`https://rdsql.com/...` — not sensitive, not
+configurable, not self-hostable from this repo). What *is* build-time-gated is
+`RDSQL_CLIENT_KEY` (see `.env.example`): a plain `git clone && make build` leaves it unset, which
 disables cloud sign-in/sync/entitlement entirely (`backend_is_cloud_configured` returns `false`) —
-every database/editor/ERD/backup feature works fully without them. There is no bundled backend
-implementation in this repo.
+every database/editor/ERD/backup feature works fully without it. This key is **not a real
+secret** (see the comment on `RDSQL_CLIENT_KEY` in `backend.rs`) — it only stops a casual
+self-built copy from silently calling production; actual access control is per-user auth via
+`backend_open_login`. There is no bundled backend implementation in this repo.
 
 ## Related project
 
