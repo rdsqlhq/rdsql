@@ -15,9 +15,9 @@ jobs:
     name: Frontend (typecheck, lint, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: 'npm'
@@ -37,7 +37,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # duckdb-rs compiles DuckDB's C++ amalgamation from source, which is
       # large enough that a cold `cargo check --all-targets && cargo test`
