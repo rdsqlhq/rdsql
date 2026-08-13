@@ -14,8 +14,10 @@
 #
 # Shipping a version (builds all 4 platforms on GitHub Actions):
 #   make version           — show the current version in every file
-#   make bump V=1.0.1      — set that version in package.json, tauri.conf.json,
-#                            Cargo.toml (+ lockfiles), then commit it yourself
+#   make bump V=1.0.1      — set that version in Cargo.toml (the single source
+#                            of truth — tauri.conf.json reads it automatically,
+#                            see below) and package.json (+ lockfiles), then
+#                            commit it yourself
 #   make publish           — tag v<version> and push; this fires release.yml
 #   make release-watch     — list recent release runs
 #   make release-publish   — flip the resulting draft Release to public
@@ -66,10 +68,14 @@ SIGN_ENV = $(if $(wildcard $(UPDATER_KEY)),TAURI_SIGNING_PRIVATE_KEY="$$(cat $(U
 OFFICIAL_ENV ?= $(HOME)/.tauri/rdsql-desktop.official.env
 API_ENV = $(if $(wildcard $(OFFICIAL_ENV)),$(shell grep -E '^[A-Z_]+=' $(OFFICIAL_ENV) | awk -F= '{printf "%s=\"%s\" ", $$1, $$2}'),)
 
-# tauri.conf.json is the source of truth for the release version: tauri-action
-# substitutes it into `tagName: v__VERSION__`, so the git tag must match it.
+# Cargo.toml is the single source of truth for the release version.
+# tauri.conf.json has no "version" field at all — Tauri reads it from
+# Cargo.toml automatically when it's absent (confirmed in the Tauri CLI's own
+# config schema: "If removed the version number from Cargo.toml is used").
+# tauri-action then substitutes that resolved version into `tagName:
+# v__VERSION__`, so the git tag must match it.
 # Assigned with `=` (not `:=`) so `make bump ... publish` sees the new value.
-APP_VERSION = $(shell node -p "require('./src-tauri/tauri.conf.json').version" 2>/dev/null)
+APP_VERSION = $(shell sed -n '1,/^version = /s/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml)
 
 # Default goal: show help instead of silently running the first target.
 .DEFAULT_GOAL := help
@@ -170,17 +176,16 @@ version: ## Show the current version in every file that carries one
 	@echo ""
 	@echo "Latest tag: $$(git describe --tags --abbrev=0 2>/dev/null || echo '(none yet)')"
 
-# The three files must agree: the workflow triggers on the pushed tag, but
-# tauri-action uploads to a release named from tauri.conf.json's version. A
-# mismatch silently produces a release under the wrong tag with no artifacts.
-check-versions: ## Verify package.json / tauri.conf.json / Cargo.toml agree
+# Cargo.toml is the single source of truth (tauri.conf.json has no "version"
+# field — Tauri reads it from Cargo.toml automatically). package.json is the
+# only other file that still needs to agree, since npm requires its own
+# version field even though nothing in the app reads it at runtime.
+check-versions: ## Verify package.json / Cargo.toml agree
 	@pkg=$$(node -p "require('./package.json').version"); \
-	tauri=$$(node -p "require('./src-tauri/tauri.conf.json').version"); \
 	crate=$$(sed -n '1,/^version = /s/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml); \
 	printf "  %-20s %s\n" "package.json" "$$pkg"; \
-	printf "  %-20s %s\n" "tauri.conf.json" "$$tauri"; \
-	printf "  %-20s %s\n" "Cargo.toml" "$$crate"; \
-	if [ "$$pkg" != "$$tauri" ] || [ "$$tauri" != "$$crate" ]; then \
+	printf "  %-20s %s\n" "Cargo.toml (source of truth)" "$$crate"; \
+	if [ "$$pkg" != "$$crate" ]; then \
 		echo ""; \
 		echo "Versions disagree. Sync them with: make bump V=x.y.z"; \
 		exit 1; \
@@ -204,7 +209,6 @@ bump: check-node ## Set the version everywhere (usage: make bump V=1.2.3)
 			j.version = v; \
 			if (j.packages && j.packages[""]) j.packages[""].version = v; \
 		}); \
-		patch("src-tauri/tauri.conf.json", j => { j.version = v; }); \
 	' $(V)
 	@sed -i.bak '1,/^version = /s/^version = .*/version = "$(V)"/' src-tauri/Cargo.toml
 	@rm -f src-tauri/Cargo.toml.bak

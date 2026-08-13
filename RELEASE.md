@@ -39,17 +39,30 @@ updater, until `make release-publish`.
 
 ---
 
-## Version numbers live in three files
+## Version: Cargo.toml is the single source of truth
 
-`package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` all
-carry the version, and they must agree. `make bump V=x.y.z` sets all three plus
-both lockfiles; `make version` shows the current state.
+`src-tauri/Cargo.toml` is the only place a release version is actually
+declared. `src-tauri/tauri.conf.json` has no `version` field at all — Tauri
+reads it from `Cargo.toml` automatically when it's absent (this is documented
+Tauri CLI behavior, not a hack), and the frontend never hardcodes it either:
+`useAppVersion()` (`src/core/hooks/useAppVersion.ts`) fetches it at runtime
+via `@tauri-apps/api/app`'s `getVersion()`, so the UI always shows whatever's
+actually running — no separate constant to go stale. (This is exactly what
+happened before: `src/core/config/version.ts` sat hardcoded at `1.0.0` for
+several releases because `make bump` never touched it — deleted now that
+nothing needs it.)
 
-**Why it matters:** the workflow triggers on the tag you push, but `tauri-action`
-uploads to a release named `v__VERSION__` read from `tauri.conf.json`. Push
-`v1.0.1` while the config still says `1.0.0` and you get a `v1.0.0` release with
-your `v1.0.1` tag pointing at nothing. `make publish` refuses to run unless the
-three agree, so this can't happen by accident.
+`package.json` still carries its own version field, since npm requires one —
+but nothing in the app reads it. `make bump V=x.y.z` sets `Cargo.toml` (the
+source of truth) and `package.json` + its lockfile (so `npm` tooling doesn't
+show a stale number); `make version` shows the current state.
+
+**Why it matters:** the workflow triggers on the tag you push, but
+`tauri-action` uploads to a release named `v__VERSION__` resolved from that
+same `Cargo.toml` version. Push `v1.0.1` while `Cargo.toml` still says `1.0.0`
+and you get a `v1.0.0` release with your `v1.0.1` tag pointing at nothing.
+`make publish` refuses to run unless `package.json` and `Cargo.toml` agree, so
+this can't happen by accident.
 
 ---
 

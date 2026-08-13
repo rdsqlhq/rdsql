@@ -60,12 +60,20 @@ export const useSyncStore = create<SyncState>((set, get) => ({
   dismissConflicts: () => set({ conflicts: [] }),
 
   keepLocal: async (connectionId) => {
-    await resolveConflictKeepLocal(connectionId);
-    set((s) => ({ conflicts: s.conflicts.filter((c) => c.id !== connectionId) }));
+    try {
+      await resolveConflictKeepLocal(connectionId);
+      set((s) => ({ conflicts: s.conflicts.filter((c) => c.id !== connectionId), status: 'idle', error: null }));
+    } catch (err: any) {
+      set({ status: 'error', error: err?.message || String(err) });
+    }
   },
 
   keepRemote: async (connectionId) => {
-    await resolveConflictKeepRemote(connectionId);
-    set((s) => ({ conflicts: s.conflicts.filter((c) => c.id !== connectionId) }));
+    try {
+      await resolveConflictKeepRemote(connectionId);
+      set((s) => ({ conflicts: s.conflicts.filter((c) => c.id !== connectionId), status: 'idle', error: null }));
+    } catch (err: any) {
+      set({ status: 'error', error: err?.message || String(err) });
+    }
   },
 }));

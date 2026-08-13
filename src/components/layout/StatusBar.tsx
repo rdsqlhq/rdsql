@@ -5,7 +5,7 @@ import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useHealthStore } from '../../store/useHealthStore';
 import { formatUptime } from '../../core/domain/health';
 import { EngineIcon } from '../common/EngineIcon';
-import { APP_VERSION } from '../../core/config/version';
+import { useAppVersion } from '../../core/hooks/useAppVersion';
 
 /** Extract a short version string from the full version() output.
  *  e.g. "PostgreSQL 16.2 on x86_64..." → "16.2"
@@ -22,6 +22,7 @@ export const StatusBar: React.FC = () => {
   const activeConn = connections.find((c) => c.id === activeConnectionId);
   const { zoomLevel, resetZoom } = useWorkspaceStore();
   const { overview, refreshOverview, connStatus, pingConnection, resetConnStatus } = useHealthStore();
+  const version = useAppVersion();
 
   // Poll the active connection every 30s: `pingConnection` (test_connection)
   // drives the connected/disconnected status dot for every engine, and
@@ -123,7 +124,7 @@ export const StatusBar: React.FC = () => {
 
         <div className="hidden sm:flex items-center gap-1 text-emerald-400">
           <CheckCircle2 className="w-3 h-3" />
-          <span>v{APP_VERSION}</span>
+          <span>v{version}</span>
         </div>
       </div>
     </footer>

@@ -6,7 +6,7 @@ import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { getVersion } from '@tauri-apps/api/app';
+import { useAppVersion } from '../../core/hooks/useAppVersion';
 
 /** Discriminated result returned by the Rust `check_for_update` command.
  *  Mirrors `UpdateCheckOutcome` in src-tauri/src/commands/updater.rs. */
@@ -16,15 +16,11 @@ type CheckOutcome =
   | { status: 'unsupported' }
   | { status: 'error'; message: string };
 
-function inTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
-
 export const AboutModal: React.FC = () => {
   const { isAboutModalOpen, setAboutModalOpen } = useWorkspaceStore();
   useEscapeToClose(isAboutModalOpen ? () => setAboutModalOpen(false) : null);
 
-  const [version, setVersion] = useState<string>('1.0.0');
+  const version = useAppVersion();
   // Update panel state.
   const [checking, setChecking] = useState(false);
   const [outcome, setOutcome] = useState<CheckOutcome | null>(null);
@@ -34,16 +30,9 @@ export const AboutModal: React.FC = () => {
   const [progress, setProgress] = useState<number | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
 
-  // Read the real app version (Tauri) once per open. Falls back to the
-  // package.json value in the browser preview.
+  // Reset transient update-check state each time the modal opens.
   useEffect(() => {
     if (!isAboutModalOpen) return;
-    if (inTauri()) {
-      getVersion()
-        .then(setVersion)
-        .catch(() => undefined);
-    }
-    // Reset transient state each time the modal opens.
     setOutcome(null);
     setUpdate(null);
     setInstalling(false);
