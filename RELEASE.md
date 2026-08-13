@@ -121,6 +121,36 @@ npx tauri signer generate -w ~/.tauri/rdsql-desktop.key
 > updates.** Users would have to download a new build by hand. Store it in a
 > password manager.
 
+### Connecting official releases to rdsql.com
+
+Cloud sign-in, sync, and entitlement are compile-time-gated by two env vars
+read via `option_env!` in `src-tauri/src/commands/backend.rs`:
+`RDSQL_API_BASE` / `RDSQL_WEB_BASE`. Unset (the default for any clone-and-build,
+including forks and PR/branch CI in `ci.yml`), `backend_is_cloud_configured()`
+returns `false` and the build ships fully functional with cloud features
+simply off — nothing else in the app depends on them.
+
+Local maintainer builds pick these up automatically from `OFFICIAL_ENV`
+(`~/.tauri/rdsql-desktop.official.env`, outside the repo — one `KEY=VALUE`
+per line, e.g. `RDSQL_API_BASE=https://rdsql.com/api`). **CI-built releases
+need the same two values as GitHub Secrets**, or `release.yml` builds them
+unset and every downloadable release ships cloud-disabled even though your
+local `make release` doesn't:
+
+```bash
+make backend-secrets      # uploads RDSQL_API_BASE / RDSQL_WEB_BASE from ~/.tauri/rdsql-desktop.official.env
+```
+
+These aren't credentials — they're plain URLs, extractable from network
+traffic or the compiled binary by anyone regardless of how they're stored in
+CI. Keeping them out of the committed source and out of fork/PR builds isn't
+about hiding them; it's so a self-compiled build from a random fork doesn't
+silently start talking to the production backend as if it were official. The
+actual security boundary is server-side: `backend_open_login`'s OAuth/device-
+pairing flow authenticates the signed-in *user* (tokens in the OS keyring),
+and billing/entitlement/abuse checks should key off that authenticated user,
+not off which binary is calling.
+
 ---
 
 ## Gotchas

@@ -20,6 +20,7 @@
 #   make release-watch     — list recent release runs
 #   make release-publish   — flip the resulting draft Release to public
 #   make updater-secrets   — one-time: push the signing key to GitHub Secrets
+#   make backend-secrets   — one-time: push RDSQL_API_BASE/RDSQL_WEB_BASE to GitHub Secrets
 #
 # Note: `release` builds locally for THIS machine only. `publish` is what
 # produces the cross-platform installers via CI.
@@ -73,7 +74,7 @@ APP_VERSION = $(shell node -p "require('./src-tauri/tauri.conf.json').version" 2
 # Default goal: show help instead of silently running the first target.
 .DEFAULT_GOAL := help
 
-.PHONY: help check-rust check-node check-gh install dev dev-web typecheck lint build release setup run-release bundle installer clean clean-dist clean-target show-artifacts version check-versions bump publish release-watch release-publish updater-secrets build-artifacts build-macos-arm64 build-macos-x64
+.PHONY: help check-rust check-node check-gh install dev dev-web typecheck lint build release setup run-release bundle installer clean clean-dist clean-target show-artifacts version check-versions bump publish release-watch release-publish updater-secrets backend-secrets build-artifacts build-macos-arm64 build-macos-x64
 
 help: ## Show this help
 	@echo "rdSQL Desktop — available targets:"
@@ -251,6 +252,26 @@ updater-secrets: check-gh ## Upload the updater signing key to GitHub Secrets
 	}
 	gh secret set TAURI_SIGNING_PRIVATE_KEY < "$(UPDATER_KEY)"
 	@printf '' | gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+	@echo "Uploaded. Verify with: gh secret list"
+
+# Pushes every KEY=VALUE line in OFFICIAL_ENV (defined near the top) as a
+# same-named GitHub Secret, so release.yml's build step can inject them into
+# the CI build the same way it already does for the updater signing key.
+# Without this, GitHub Actions-built releases ship with cloud features
+# disabled even though your local `make release` (which reads OFFICIAL_ENV
+# directly) has them on.
+backend-secrets: check-gh ## Upload RDSQL_API_BASE / RDSQL_WEB_BASE (from OFFICIAL_ENV) to GitHub Secrets
+	@test -f "$(OFFICIAL_ENV)" || { \
+		echo "Official backend config not found at $(OFFICIAL_ENV)."; \
+		echo "Create it with one KEY=VALUE per line, e.g.:"; \
+		echo "  RDSQL_API_BASE=https://rdsql.com/api"; \
+		echo "  RDSQL_WEB_BASE=https://rdsql.com"; \
+		exit 1; \
+	}
+	@grep -E '^[A-Z_]+=' "$(OFFICIAL_ENV)" | while IFS='=' read -r key val; do \
+		echo "Setting $$key…"; \
+		printf '%s' "$$val" | gh secret set "$$key"; \
+	done
 	@echo "Uploaded. Verify with: gh secret list"
 
 release-watch: check-gh ## List recent GitHub release-workflow runs

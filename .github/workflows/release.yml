@@ -78,6 +78,15 @@ jobs:
           # latest.json is emitted — so the in-app updater finds nothing.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compile-time only (read via option_env! in backend.rs). Without
+          # these the build still succeeds — it just ships with cloud
+          # sign-in/sync/entitlement disabled (require_cloud_configured
+          # returns false); every DB/editor/backup/AI feature works either
+          # way. Only set as secrets on this repo, so they're populated for
+          # the maintainer-triggered tag-push release build here — forks and
+          # PR/branch CI (ci.yml) never reference or receive them.
+          RDSQL_API_BASE: ${{ secrets.RDSQL_API_BASE }}
+          RDSQL_WEB_BASE: ${{ secrets.RDSQL_WEB_BASE }}
         with:
           tagName: v__VERSION__
           releaseName: 'rdSQL Desktop v__VERSION__'
