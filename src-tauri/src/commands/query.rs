@@ -1,0 +1,523 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tokio_postgres::NoTls;
+use tokio_postgres::types::Type as PgType;
+use rusqlite::Connection;
+use mysql_async::prelude::*;
+use tokio_util::sync::CancellationToken;
+use super::connection::{normalize_host, ConnectionConfig};
+use super::error::{from_mysql, from_postgres, from_sqlite, DbError, ErrorKind};
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Tracks in-flight queries by id so a `cancel_query` call can signal them to
+/// abort. Held in Tauri app state.
+pub type QueryRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
+
+/// Error string returned to the frontend when the user cancels a running query.
+pub const CANCELLED_BY_USER: &str = "Query cancelled by user";
+
+/// Convert a MySQL column type to a clean human-readable name, stripping the
+/// `MYSQL_TYPE_` prefix (e.g. `MYSQL_TYPE_BLOB` → `blob`, `MYSQL_TYPE_LONG`
+/// → `int`, `MYSQL_TYPE_VAR_STRING` → `varchar`).
+fn mysql_type_name<T: std::fmt::Debug>(t: &T) -> String {
+    let raw = format!("{:?}", t);
+    let cleaned = raw
+        .strip_prefix("MYSQL_TYPE_")
+        .unwrap_or(&raw)
+        .to_lowercase();
+    match cleaned.as_str() {
+        "long" | "longlong" | "int24" | "short" | "tiny" => "int".to_string(),
+        "var_string" => "varchar".to_string(),
+        "newdecimal" => "decimal".to_string(),
+        "newdate" => "date".to_string(),
+        "timestamp2" => "timestamp".to_string(),
+        "datetime2" => "datetime".to_string(),
+        "time2" => "time".to_string(),
+        "tiny_blob" | "medium_blob" | "long_blob" => "blob".to_string(),
+        "enum" => "enum".to_string(),
+        "set" => "set".to_string(),
+        "geometry" => "geometry".to_string(),
+        "bit" => "bit".to_string(),
+        "null" => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+pub(crate) fn mysql_opts(host: String, port: u16, user: String, pass: String, db: Option<String>) -> mysql_async::Opts {
+    mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(port)
+        .user(Some(user))
+        .pass(Some(pass))
+        .db_name(db)
+        .into()
+}
+
+pub(crate) fn mysql_value_to_json(v: &mysql_async::Value) -> serde_json::Value {
+    use mysql_async::Value as V;
+    match v {
+        V::NULL => serde_json::Value::Null,
+        V::Bytes(b) => match std::str::from_utf8(b) {
+            Ok(s) => serde_json::json!(s),
+            Err(_) => serde_json::json!(format!("<binary {} bytes>", b.len())),
+        },
+        V::Int(i) => serde_json::json!(i),
+        V::UInt(u) => serde_json::json!(u),
+        V::Float(f) => serde_json::json!(f),
+        V::Double(d) => serde_json::json!(d),
+        V::Date(y, mo, d, h, mi, s, micro) => {
+            serde_json::json!(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}", y, mo, d, h, mi, s, micro))
+        }
+        V::Time(neg, days, h, mi, s, micro) => {
+            let sign = if *neg { "-" } else { "" };
+            serde_json::json!(format!("{}{}d {:02}:{:02}:{:02}.{:06}", sign, days, h, mi, s, micro))
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueryRequest {
+    pub config: ConnectionConfig,
+    pub sql: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueryColumn {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueryResult {
+    pub columns: Vec<QueryColumn>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub execution_time_ms: u64,
+    pub affected_rows: u64,
+    pub status_message: String,
+}
+
+/// Cancels a running query by id. The token is removed from the registry
+/// (the still-running query observes the cancel and returns its own error).
+#[tauri::command]
+pub async fn cancel_query(query_id: String, registry: tauri::State<'_, QueryRegistry>) -> Result<bool, String> {
+    let token = { registry.lock().await.remove(&query_id) };
+    if let Some(t) = token {
+        t.cancel();
+        Ok(true)
+    } else {
+        // Already finished or unknown — report false so the UI can react.
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub async fn execute_query(
+    request: QueryRequest,
+    query_id: String,
+    registry: tauri::State<'_, QueryRegistry>,
+) -> Result<QueryResult, String> {
+    let token = CancellationToken::new();
+    registry.lock().await.insert(query_id.clone(), token.clone());
+
+    // Race the actual run against cancellation. We also abort the inner future
+    // by selecting on its handle — when cancel wins we return immediately.
+    let run_fut = run_query(request);
+
+    let result = tokio::select! {
+        biased;
+        _ = token.cancelled() => Err(DbError::app(CANCELLED_BY_USER).to_json_string()),
+        res = run_fut => res,
+    };
+
+    registry.lock().await.remove(&query_id);
+    result
+}
+
+/// Convert a PostgreSQL cell value to JSON, using the column's type OID to
+/// pick the right Rust representation. This is critical: `try_get::<_, String>`
+/// only works for character types — it silently returns `None` for int/float/
+/// bool/date/uuid/etc., which made `COUNT(*)` return `null` and broke every
+/// numeric/boolean column in SELECT results. By dispatching on `Type`, each
+/// category gets its native FromSql implementation.
+fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_json::Value {
+    use serde_json::json;
+    // Each typed getter below uses Option<T>, which returns None for SQL NULL.
+    match *ty {
+        // Integer family — Option wraps SQL NULL.
+        PgType::INT2 => {
+            let v: Option<i16> = row.try_get(idx).ok().flatten();
+            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+        }
+        PgType::INT4 => {
+            let v: Option<i32> = row.try_get(idx).ok().flatten();
+            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+        }
+        PgType::INT8 => {
+            let v: Option<i64> = row.try_get(idx).ok().flatten();
+            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+        }
+        // Floating point.
+        PgType::FLOAT4 => {
+            let v: Option<f32> = row.try_get(idx).ok().flatten();
+            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+        }
+        PgType::FLOAT8 => {
+            let v: Option<f64> = row.try_get(idx).ok().flatten();
+            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+        }
+        // Boolean.
+        PgType::BOOL => {
+            let v: Option<bool> = row.try_get(idx).ok().flatten();
+            v.map(|b| json!(b)).unwrap_or(serde_json::Value::Null)
+        }
+        // Numeric / decimal — convert to string to preserve precision (BigDecimal
+        // isn't in scope without a feature flag, and string round-trips cleanly).
+        PgType::NUMERIC => {
+            let v: Option<String> = row.try_get(idx).ok().flatten();
+            v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
+        }
+        // UUID — tokio_postgres needs the `with-uuid-1` feature to deserialize
+        // directly to uuid::Uuid. Without it, the text representation works
+        // fine (UUIDs are sent as text on the wire protocol).
+        PgType::UUID => {
+            let v: Option<String> = row.try_get(idx).ok().flatten();
+            v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
+        }
+        // JSON / JSONB — tokio_postgres can deserialize these to serde_json::Value
+        // only with the `with-serde_json-1` feature. Without it, we get the raw
+        // text (JSONB is sent as text wire format anyway). Parse it into JSON so
+        // the frontend receives a structured value, not a string.
+        PgType::JSON | PgType::JSONB => {
+            let v: Option<String> = row.try_get(idx).ok().flatten();
+            match v {
+                Some(s) => serde_json::from_str::<serde_json::Value>(&s)
+                    .unwrap_or_else(|_| json!(s)),
+                None => serde_json::Value::Null,
+            }
+        }
+        // Bytea — describe rather than dump raw bytes.
+        PgType::BYTEA => {
+            let v: Option<Vec<u8>> = row.try_get(idx).ok().flatten();
+            v.map(|b| json!(format!("<{} bytes>", b.len())))
+                .unwrap_or(serde_json::Value::Null)
+        }
+        // Everything else (text, varchar, bpchar, name, timestamp, date, time,
+        // interval, inet, etc.) converts cleanly to String.
+        _ => {
+            let v: Option<String> = row.try_get(idx).ok().flatten();
+            v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
+        }
+    }
+}
+
+async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
+    let start = Instant::now();
+    let sql = request.sql.trim();
+
+    if sql.is_empty() {
+        return Err(DbError::app("SQL statement is empty — nothing to execute.").to_json_string());
+    }
+
+    let engine = request.config.engine.to_lowercase();
+
+    // D1 reuses SQLite SQL over REST — short-circuit before family dispatch.
+    if engine == "cloudflare-d1" || engine == "d1" {
+        let result = super::d1::run_d1_query(&request.config, sql).await?;
+        let columns = result
+            .columns
+            .iter()
+            .map(|c| QueryColumn {
+                name: c.name.clone(),
+                data_type: c.data_type.clone(),
+            })
+            .collect();
+        return Ok(QueryResult {
+            columns,
+            rows: result.rows,
+            execution_time_ms: result.execution_time_ms,
+            affected_rows: result.affected_rows,
+            status_message: result.status_message,
+        });
+    }
+    // DuckDB has its own driver — dispatch to the dedicated module.
+    if engine == "duckdb" {
+        return super::duckdb::run_duckdb_query(&request.config, sql);
+    }
+    // SQL Server has its own driver — dispatch to the dedicated module.
+    if engine == "mssql" || engine == "sqlserver" || engine == "azuresql" {
+        return super::mssql::run_mssql_query(&request.config, sql).await;
+    }
+
+    match super::engine::engine_family(&engine) {
+        super::engine::EngineFamily::Sqlite => {
+            let path = request.config.file_path.unwrap_or_default();
+            if path.is_empty() {
+                return Err(DbError::app("SQLite file path is empty. Set a database file in the connection.").to_json_string());
+            }
+            let conn = Connection::open(&path).map_err(|e| from_sqlite(e, None).to_json_string())?;
+
+            if sql.to_uppercase().starts_with("SELECT")
+                || sql.to_uppercase().starts_with("PRAGMA")
+                || sql.to_uppercase().starts_with("EXPLAIN")
+            {
+                let mut stmt = conn.prepare(sql).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())?;
+                let col_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+
+                let columns: Vec<QueryColumn> = col_names
+                    .iter()
+                    .map(|n| QueryColumn {
+                        name: n.clone(),
+                        data_type: "TEXT".to_string(),
+                    })
+                    .collect();
+
+                let mut rows_data = Vec::new();
+                let mut rows_iter = stmt.query([]).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())?;
+
+                while let Ok(Some(row)) = rows_iter.next() {
+                    let mut row_vals = Vec::new();
+                    for i in 0..col_names.len() {
+                        let val: rusqlite::types::Value = row.get(i).unwrap_or(rusqlite::types::Value::Null);
+                        let json_val = match val {
+                            rusqlite::types::Value::Null => serde_json::Value::Null,
+                            rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                            rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                            rusqlite::types::Value::Text(s) => serde_json::json!(s),
+                            rusqlite::types::Value::Blob(b) => serde_json::json!(format!("<blob {} bytes>", b.len())),
+                        };
+                        row_vals.push(json_val);
+                    }
+                    rows_data.push(row_vals);
+                }
+
+                let elapsed = start.elapsed().as_millis() as u64;
+                let count = rows_data.len() as u64;
+                Ok(QueryResult {
+                    columns,
+                    rows: rows_data,
+                    execution_time_ms: elapsed,
+                    affected_rows: count,
+                    status_message: format!("Query executed successfully ({})", path),
+                })
+            } else {
+                let affected = conn.execute(sql, []).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())? as u64;
+                let elapsed = start.elapsed().as_millis() as u64;
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    execution_time_ms: elapsed,
+                    affected_rows: affected,
+                    status_message: format!("OK, {} rows affected", affected),
+                })
+            }
+        }
+        super::engine::EngineFamily::Postgres => {
+            let host = normalize_host(request.config.host.clone());
+            let port = request.config.port.or_else(|| super::engine::default_port(&engine)).unwrap_or(5432);
+            let (host, port) = super::ssh_tunnel::resolve_target(&request.config, host, port).await?;
+            let user = request.config.username.unwrap_or_else(|| "postgres".to_string());
+            let db = request.config.database.unwrap_or_else(|| "postgres".to_string());
+            let pass = request.config.password.unwrap_or_default();
+
+            let conn_str = format!(
+                "host={} port={} user={} dbname={} password={}",
+                host, port, user, db, pass
+            );
+
+            let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_postgres::connect(&conn_str, NoTls)).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => {
+                    let mut d = from_postgres(e, None);
+                    // Connect-time failures are connection-class even if the
+                    // server replied (e.g. bad password / wrong database).
+                    d.kind = ErrorKind::Connection;
+                    return Err(d.to_json_string());
+                }
+                Err(_) => {
+                    return Err(DbError::connection(format!(
+                        "PostgreSQL connection timed out after {}s — check that the server is running on {}:{}",
+                        CONNECT_TIMEOUT.as_secs(), host, port
+                    )).to_json_string())
+                }
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("PostgreSQL connection error: {}", e);
+                }
+            });
+
+            if sql.to_uppercase().starts_with("SELECT")
+                || sql.to_uppercase().starts_with("EXPLAIN")
+                || sql.to_uppercase().starts_with("SHOW")
+            {
+                // Prepare the statement first so we can extract column metadata
+                // even when the query returns zero rows (empty table preview).
+                let stmt = client.prepare(sql).await
+                    .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                let columns: Vec<QueryColumn> = stmt
+                    .columns()
+                    .iter()
+                    .map(|col| QueryColumn {
+                        name: col.name().to_string(),
+                        data_type: col.type_().name().to_string(),
+                    })
+                    .collect();
+                // Keep the column Type OIDs so we can dispatch each cell's
+                // conversion by its actual PostgreSQL type (int8, float8, bool,
+                // text, etc.) instead of blindly casting everything to String
+                // — which silently nullifies non-character types.
+                let col_types: Vec<PgType> = stmt.columns().iter().map(|c| c.type_().clone()).collect();
+                drop(stmt);
+
+                let rows = client.query(sql, &[]).await
+                    .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+
+                let mut rows_data = Vec::new();
+                for row in &rows {
+                    let mut row_vals = Vec::new();
+                    for i in 0..columns.len() {
+                        let ty = &col_types[i];
+                        row_vals.push(pg_cell_to_json(row, i, ty));
+                    }
+                    rows_data.push(row_vals);
+                }
+
+                let elapsed = start.elapsed().as_millis() as u64;
+                let count = rows_data.len() as u64;
+                Ok(QueryResult {
+                    columns,
+                    rows: rows_data,
+                    execution_time_ms: elapsed,
+                    affected_rows: count,
+                    status_message: "Query executed successfully".to_string(),
+                })
+            } else {
+                let count = client.execute(sql, &[]).await
+                    .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                let elapsed = start.elapsed().as_millis() as u64;
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    execution_time_ms: elapsed,
+                    affected_rows: count,
+                    status_message: format!("OK, {} rows affected", count),
+                })
+            }
+        }
+        super::engine::EngineFamily::Mysql => {
+            let host = normalize_host(request.config.host.clone());
+            let port = request.config.port.or_else(|| super::engine::default_port(&engine)).unwrap_or(3306);
+            let (host, port) = super::ssh_tunnel::resolve_target(&request.config, host, port).await?;
+            let user = request.config.username.unwrap_or_else(|| "root".to_string());
+            let db = request.config.database.clone().filter(|d| !d.is_empty());
+            let pass = request.config.password.unwrap_or_default();
+
+            let opts = mysql_opts(host.clone(), port, user, pass, db);
+            // Create a fresh pool per call. Connection pooling was attempted but
+            // caused "Pool was disconnected" errors when connections went stale
+            // after the server's wait_timeout. The frontend batching (fast mode)
+            // mitigates the overhead by reducing the number of IPC calls.
+            let pool = mysql_async::Pool::new(opts);
+            let mut conn = match tokio::time::timeout(CONNECT_TIMEOUT, pool.get_conn()).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    let mut d: DbError = from_mysql(e, None).into();
+                    d.kind = ErrorKind::Connection;
+                    return Err(d.to_json_string());
+                }
+                Err(_) => {
+                    return Err(DbError::connection(format!(
+                        "MySQL connection timed out after {}s — check that MySQL is running on {}:{}",
+                        CONNECT_TIMEOUT.as_secs(), host, port
+                    )).to_json_string())
+                }
+            };
+
+            let upper = sql.to_uppercase();
+            if upper.starts_with("SELECT")
+                || upper.starts_with("SHOW")
+                || upper.starts_with("EXPLAIN")
+                || upper.starts_with("DESC")
+            {
+                let mut result = conn.query_iter(sql).await.map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
+
+                // Extract column metadata from the query result before iterating
+                // rows so it's available even when the table is empty.
+                let col_meta = result.columns_ref().to_vec();
+                let columns: Vec<QueryColumn> = col_meta
+                    .iter()
+                    .map(|c| QueryColumn {
+                        name: c.name_str().to_string(),
+                        data_type: mysql_type_name(&c.column_type()),
+                    })
+                    .collect();
+
+                let mut rows_data = Vec::new();
+                loop {
+                    let row_opt = match result.next().await {
+                        Ok(o) => o,
+                        Err(e) => {
+                            drop(conn);
+                            let _ = pool.disconnect().await;
+                            return Err(from_mysql(e, Some(sql)).0.to_json_string());
+                        }
+                    };
+                    let row = match row_opt {
+                        Some(r) => r,
+                        None => break,
+                    };
+                    let mut row_vals = Vec::new();
+                    for i in 0..columns.len() {
+                        let json_val = match row.as_ref(i) {
+                            Some(v) => mysql_value_to_json(v),
+                            None => serde_json::Value::Null,
+                        };
+                        row_vals.push(json_val);
+                    }
+                    rows_data.push(row_vals);
+                }
+
+                drop(conn);
+                let _ = pool.disconnect().await;
+
+                let elapsed = start.elapsed().as_millis() as u64;
+                let count = rows_data.len() as u64;
+                Ok(QueryResult {
+                    columns,
+                    rows: rows_data,
+                    execution_time_ms: elapsed,
+                    affected_rows: count,
+                    status_message: "Query executed successfully".to_string(),
+                })
+            } else {
+                conn.query_drop(sql).await.map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
+                let affected = conn.affected_rows();
+                let elapsed = start.elapsed().as_millis() as u64;
+                drop(conn);
+                let _ = pool.disconnect().await;
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    execution_time_ms: elapsed,
+                    affected_rows: affected,
+                    status_message: format!("OK, {} rows affected", affected),
+                })
+            }
+        }
+        // DuckDB is short-circuited above (`run_duckdb_query`); this arm is
+        // unreachable but keeps the family match exhaustive.
+        super::engine::EngineFamily::Duckdb => {
+            Err(DbError::app("DuckDB query was not dispatched correctly.").to_json_string())
+        }
+        // SQL Server is short-circuited above (`run_mssql_query`); this arm is
+        // unreachable but keeps the family match exhaustive.
+        super::engine::EngineFamily::Mssql => {
+            Err(DbError::app("SQL Server query was not dispatched correctly.").to_json_string())
+        }
+    }
+}

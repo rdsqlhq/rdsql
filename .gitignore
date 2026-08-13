@@ -1,0 +1,20 @@
+node_modules
+dist
+dist-isolation
+src-tauri/target
+src-tauri/gen
+.DS_Store
+*.log
+*.tmp
+
+# Env / local secrets. This repo has no required runtime .env today (the
+# optional cloud-sync build vars in src-tauri/src/commands/backend.rs are
+# injected at build time by the Makefile from a file outside the repo), but
+# these are ignored as a safety net for anything added later.
+.env
+.env.*
+!.env.example
+
+# Editor / agent tooling state — never meant to be committed.
+.claude/
+.zcode/

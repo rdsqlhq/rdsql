@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  frontend:
+    name: Frontend (typecheck, lint, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+
+  rust:
+    name: Rust (check, test)
+    runs-on: ubuntu-22.04
+    env:
+      # DuckDB's C++ build is huge; disable incremental compilation to keep
+      # the target/ dir from blowing past the runner's free disk.
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      # duckdb-rs compiles DuckDB's C++ amalgamation from source, which is
+      # large enough that a cold `cargo check --all-targets && cargo test`
+      # on the stock ~14GB-free runner disk fails with ENOSPC ("No space
+      # left on device") partway through. Free space by dropping large
+      # preinstalled toolchains this job never uses.
+      - name: Free up disk space
+        # duckdb-rs compiles DuckDB's C++ amalgamation from source (~2GB of
+        # intermediate object files). The stock runner has ~14GB free, which
+        # is no longer enough — the build dies with ENOSPC at the `ar` step
+        # that archives libduckdb.a. Reclaim space by removing large
+        # preinstalled toolchains this job never uses, plus Docker images,
+        # snap packages, and the browser/tool caches.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL "$AGENT_TOOLSDIRECTORY" \
+            /usr/local/share/boost /opt/az /opt/microsoft /usr/lib/jvm \
+            /var/lib/docker /snap/* /usr/local/share/chromium \
+            /usr/local/share/edge /usr/local/share/firefox 2>/dev/null || true
+          sudo apt-get clean
+          sudo apt-get autoremove -y >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test

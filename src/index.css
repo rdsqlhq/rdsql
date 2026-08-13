@@ -1,0 +1,227 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-darker: #06090e;
+    --bg-dark: #0a0f18;
+    --bg-card: #0f172a;
+    --border-color: #1e293b;
+    --accent-blue: #3b82f6;
+    --accent-cyan: #06b6d4;
+  }
+
+  body {
+    background-color: var(--bg-darker);
+    color: #e2e8f0;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Custom Sleek Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.5);
+}
+
+/* macOS overlay scrollbar — thinner, transparent until hover */
+.macos-scroll::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.macos-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.macos-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+.macos-scroll:hover::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+}
+.macos-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.5);
+}
+
+.glass-panel {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.glow-blue {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.25);
+}
+
+/* Monaco Editor Container */
+.monaco-editor {
+  padding-top: 4px;
+  /* Monaco's default focus outline uses VS Code's blue focusBorder color;
+     swap it for a subtle gray to match the app's dark theme. */
+  outline-color: #334155 !important;
+}
+
+/* React Flow (ERD) dark theme overrides — the library ships a light-mode
+   default (white minimap) that clashes with the app theme. (The built-in
+   <Controls> panel is no longer rendered — zoom/fit live in our custom
+   floating toolbar — so its overrides were removed.) */
+.react-flow__minimap {
+  background-color: #0a0f18 !important;
+}
+.react-flow__attribution {
+  display: none !important;
+}
+
+/* Subtle motion for the ERD: nodes ease into their new layout position
+   instead of snapping, but the transition is skipped while a node is being
+   actively dragged so the cursor never feels laggy. Edges fade in on
+   appearance (progressive expansion) rather than popping in abruptly. */
+.react-flow__node {
+  transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.react-flow__node.dragging {
+  transition: none;
+}
+.react-flow__edge {
+  animation: erd-edge-in 260ms ease;
+}
+.react-flow__edge-path {
+  transition: stroke-opacity 150ms ease, opacity 150ms ease;
+}
+@keyframes erd-edge-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__node,
+  .react-flow__edge {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ── Flatpickr: compact dark popover for the data-grid cell editor ────────
+   The default calendar is oversized for a dense table. These overrides
+   shrink the popover + inputs to match the grid's text-xs scale and give it
+   the app's slate/dark palette. Scoped to `.flatpickr-*` (only rendered while
+   a picker is open) so they don't leak into anything else. */
+.flatpickr-calendar {
+  background: #0a0f18 !important;
+  border: 1px solid #1e293b !important;
+  border-radius: 10px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5) !important;
+  font-size: 11px !important;
+  width: 230px !important;
+  padding: 8px !important;
+  color: #e2e8f0 !important;
+}
+/* Month/year header row */
+.flatpickr-months {
+  margin-bottom: 4px !important;
+}
+.flatpickr-current-month {
+  font-size: 12px !important;
+  padding-top: 0 !important;
+}
+.flatpickr-current-month input.cur-year {
+  font-size: 12px !important;
+  color: #e2e8f0 !important;
+}
+.flatpickr-monthDropdown-months {
+  font-size: 12px !important;
+  color: #e2e8f0 !important;
+  background: #0a0f18 !important;
+}
+/* Prev/next arrows */
+.flatpickr-prev-month,
+.flatpickr-next-month {
+  fill: #94a3b8 !important;
+  height: 22px !important;
+  top: 4px !important;
+}
+.flatpickr-prev-month:hover svg,
+.flatpickr-next-month:hover svg {
+  fill: #60a5fa !important;
+}
+/* Weekday labels */
+.flatpickr-weekday {
+  color: #64748b !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+}
+/* Day cells */
+.flatpickr-day {
+  color: #cbd5e1 !important;
+  border-radius: 5px !important;
+  height: 24px !important;
+  line-height: 24px !important;
+  margin: 1px 0 !important;
+}
+.flatpickr-day:hover {
+  background: #141e33 !important;
+  border-color: #141e33 !important;
+  color: #e2e8f0 !important;
+}
+.flatpickr-day.selected,
+.flatpickr-day.selected:hover {
+  background: #3b82f6 !important;
+  border-color: #3b82f6 !important;
+  color: #fff !important;
+}
+.flatpickr-day.today {
+  border-color: #3b82f6 !important;
+}
+.flatpickr-day.today.selected {
+  border-color: #3b82f6 !important;
+}
+.flatpickr-day.prevMonthDay,
+.flatpickr-day.nextMonthDay {
+  color: #475569 !important;
+}
+/* Time picker row (datetime / time modes) */
+.flatpickr-time {
+  border-top: 1px solid #1e293b !important;
+  height: 30px !important;
+  margin-top: 6px !important;
+}
+.flatpickr-time input {
+  color: #e2e8f0 !important;
+  font-size: 12px !important;
+  background: transparent !important;
+}
+.flatpickr-time input:focus {
+  background: #141e33 !important;
+  border-radius: 4px !important;
+}
+.flatpickr-time .numInputWrapper span.arrowUp:after {
+  border-bottom-color: #94a3b8 !important;
+}
+.flatpickr-time .numInputWrapper span.arrowDown:after {
+  border-top-color: #94a3b8 !important;
+}
+.flatpickr-time-separator,
+.flatpickr-time .flatpickr-am-pm {
+  color: #64748b !important;
+}
+/* The input field itself shouldn't show a focus ring that overflows the cell. */
+.flatpickr input[type="text"]:focus {
+  outline: none !important;
+}
+

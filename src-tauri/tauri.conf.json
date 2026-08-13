@@ -1,0 +1,102 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "rdSQL",
+  "version": "1.1.2",
+  "identifier": "com.rdsql.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "rdSQL - Community Edition",
+        "width": 1280,
+        "height": 830,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "theme": "Dark",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "rdSQL Team",
+    "category": "Developer Tool",
+    "shortDescription": "Modern Database Workspace",
+    "fileAssociations": [
+      {
+        "ext": [
+          "rdsql"
+        ],
+        "name": "rdSQL Encrypted Connections",
+        "description": "Encrypted connection bundle exported by rdSQL",
+        "role": "Editor",
+        "mimeType": "application/x-rdsql"
+      },
+      {
+        "ext": [
+          "rdsqlw"
+        ],
+        "name": "rdSQL Workspace",
+        "description": "rdSQL workspace / project file",
+        "role": "Editor",
+        "mimeType": "application/x-rdsql-workspace"
+      },
+      {
+        "ext": [
+          "sql"
+        ],
+        "name": "SQL Script",
+        "description": "SQL script file",
+        "role": "Editor",
+        "mimeType": "application/sql"
+      },
+      {
+        "ext": [
+          "sqlite",
+          "sqlite3"
+        ],
+        "name": "SQLite Database",
+        "description": "SQLite database file",
+        "role": "Editor",
+        "mimeType": "application/vnd.sqlite3"
+      }
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "rdsql"
+        ]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/rdsqlhq/rdsql/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ2OTBERUYyMjk5MTBEQzQKUldURURaRXA4dDZRMWd4RHQwV1VhbHJaWUFjNnd3VW1VVjhYRWZyMUFPWWxpcS9UQTBKTXdQWWYK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

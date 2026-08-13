@@ -1,0 +1,96 @@
+# Local test infrastructure for rdSQL Desktop.
+#
+# - mssql — exercises the tiberius-based driver
+#   (src-tauri/src/commands/mssql.rs) against a real server without needing
+#   a hosted instance. `MSSQL_SA_PASSWORD` below is a dev-only default; do
+#   not reuse it anywhere real.
+#
+#   Microsoft doesn't publish a Linux/arm64 SQL Server image — on Apple
+#   Silicon, `mssql/server:2022-latest` only runs under x86_64 emulation and
+#   reliably segfaults there (SQL Server 2022 hard-requires AVX2, which
+#   QEMU's emulation doesn't support). Default here is `azure-sql-edge`,
+#   Microsoft's arm64-native, TDS/T-SQL-compatible substitute for local dev
+#   on Apple Silicon. On an x86_64 host, swap the `image:` line below for
+#   `mcr.microsoft.com/mssql/server:2022-latest` to test against real SQL
+#   Server instead.
+#
+# - redis / redis-auth — exercise the redis-rs-based driver
+#   (src-tauri/src/commands/redis.rs). `redis-auth` is a second instance
+#   with a password set, so the ACL-username/password path in
+#   `redis.rs::build_url` gets exercised too (TLS is not covered here — that
+#   needs real certs, out of scope for local smoke testing).
+#   `rdSQL_dev_Passw0rd!` below is a dev-only default; do not reuse it
+#   anywhere real.
+#
+# - mongo — exercises the official `mongodb` driver crate
+#   (src-tauri/src/commands/mongo.rs). No auth (the `mongo_auth_source`/
+#   `mongo_connection_string` paths need a real Atlas or auth-enabled
+#   deployment to exercise end-to-end, out of scope for local smoke testing).
+#
+# Usage:
+#   docker compose up -d mssql
+#   # wait for the healthcheck to pass, then in the app: New Connection →
+#   # SQL Server → host 127.0.0.1, port 1433, user sa, password below.
+#
+#   docker compose up -d redis redis-auth
+#   scripts/test-redis-docker.sh   # seeds keys + runs the ignored integration
+#                                  # tests in commands::redis against both
+#
+#   docker compose up -d mongo
+#   scripts/test-mongo-docker.sh   # seeds a database/collection + runs the
+#                                  # ignored integration tests in commands::mongo
+#
+#   docker compose down
+
+services:
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "rdSQL_dev_Passw0rd!"
+    ports:
+      - "1433:1433"
+    healthcheck:
+      # azure-sql-edge doesn't ship sqlcmd/mssql-tools — a plain TCP probe on
+      # 1433 is enough to know the server is accepting connections. `/dev/tcp`
+      # is a bash builtin, not POSIX sh (the container's default shell), so
+      # invoke bash explicitly.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1433' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis-auth:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "rdSQL_dev_Passw0rd!"]
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "rdSQL_dev_Passw0rd!", "--no-auth-warning", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s

@@ -1,0 +1,239 @@
+name: Release Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest' # ARM64 macOS (Apple Silicon)
+            target: 'aarch64-apple-darwin'
+          - platform: 'windows-latest' # Windows x64
+            target: 'x86_64-pc-windows-msvc'
+          - platform: 'ubuntu-22.04' # Linux x64
+            target: 'x86_64-unknown-linux-gnu'
+          # NOTE: macOS Intel (x86_64-apple-darwin on macos-13) intentionally
+          # omitted — the macos-13 runner requires a paid GitHub plan. Apple
+          # Silicon users get a native arm64 build; Intel Mac users can run
+          # the arm64 build under Rosetta, or build locally with
+          # `make build-macos-x64`.
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # See ci.yml for why: duckdb-rs's from-source C++ build can exhaust
+      # the runner's default free disk space.
+      - name: Free up disk space
+        if: matrix.platform == 'ubuntu-22.04'
+        # Same aggressive cleanup as ci.yml — duckdb-rs's from-source C++
+        # build is the single biggest disk consumer and can exhaust the
+        # runner's default free space even in release mode.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL "$AGENT_TOOLSDIRECTORY" \
+            /usr/local/share/boost /opt/az /opt/microsoft /usr/lib/jvm \
+            /var/lib/docker /snap/* /usr/local/share/chromium \
+            /usr/local/share/edge /usr/local/share/firefox 2>/dev/null || true
+          sudo apt-get clean
+          sudo apt-get autoremove -y >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Tauri App
+        id: tauri-build
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Without these the build still succeeds, but no signature and no
+          # latest.json is emitted — so the in-app updater finds nothing.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'rdSQL Desktop v__VERSION__'
+          releaseBody: 'See release notes for changes.'
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+      # Upload installers to Cloudflare R2 so the website's /download/<file>
+      # endpoint can serve them. Skips updater sidecars (.sig, .tar.gz,
+      # latest.json) — only real installers go to the bucket. Old versions'
+      # files are never touched (filenames are version-suffixed, so this
+      # never overwrites a previous release) — nothing to do to "keep the
+      # old ones", that's just how R2 object keys work.
+      #
+      # Also computes a sha256 + size per uploaded file and writes a
+      # per-target fragment (manifest/<target>.json) to R2. The
+      # `publish-manifest` job (after all matrix legs finish) merges these
+      # into one rdsql-downloads/manifest.json that the website reads to
+      # render the download page — real per-release filenames + checksums,
+      # no hand-editing the site on every release.
+      - name: Upload installers to R2
+        env:
+          ARTIFACTS: ${{ steps.tauri-build.outputs.artifactPaths }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "⚠ CLOUDFLARE_API_TOKEN not set — skipping R2 upload"
+            exit 0
+          fi
+          echo "Uploading installers to rdsql-downloads bucket…"
+          fragment="[]"
+          # Iterate artifact paths safely. tauri-action returns a JSON array;
+          # on Windows the env var can carry CRLF line endings, so we strip
+          # stray \r and use a while-read loop instead of word-splitting on
+          # $(…), which chokes on paths containing spaces or \r.
+          while IFS= read -r f; do
+            f="${f%$'\r'}"            # strip trailing CR (Windows CRLF)
+            [ -n "$f" ] || continue
+            name=$(basename "$f")
+            # Only upload installer files — skip updater artifacts
+            case "$name" in
+              *.dmg|*.msi|*.exe|*-setup.exe|*.deb|*.rpm|*.AppImage)
+                echo "  ↑ $name"
+                npx wrangler r2 object put "rdsql-downloads/$name" --file "$f" --remote \
+                  && echo "    ✓ uploaded" \
+                  || { echo "    ✗ failed"; continue; }
+                if command -v sha256sum >/dev/null 2>&1; then
+                  sha=$(sha256sum "$f" | cut -d' ' -f1)
+                else
+                  sha=$(shasum -a 256 "$f" | cut -d' ' -f1)
+                fi
+                sha="${sha%$'\r'}"
+                size=$(wc -c < "$f" | tr -d '[:space:]')
+                fragment=$(echo "$fragment" | jq --arg name "$name" --arg sha "$sha" --argjson size "$size" \
+                  '. + [{file: $name, sha256: $sha, size: $size}]')
+                ;;
+              *)
+                echo "  · skip $name (not an installer)"
+                ;;
+            esac
+          done < <(echo "$ARTIFACTS" | jq -r '.[]')
+          echo "$fragment" > manifest-fragment.json
+          cat manifest-fragment.json
+          npx wrangler r2 object put "rdsql-downloads/manifest/${{ matrix.target }}.json" \
+            --file manifest-fragment.json --remote --content-type application/json
+
+  # Runs once, after all 4 matrix legs succeed. Merges their per-target
+  # fragments into rdsql-downloads/manifest.json — the single file the
+  # website reads to render current version + real checksums. Only runs if
+  # every leg succeeded, so a partial/broken release never overwrites the
+  # last known-good manifest.
+  publish-manifest:
+    needs: release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Merge fragments and publish manifest.json
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "⚠ CLOUDFLARE_API_TOKEN not set — skipping manifest publish"
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          targets=(aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu)
+          files="[]"
+          for t in "${targets[@]}"; do
+            npx wrangler r2 object get "rdsql-downloads/manifest/$t.json" --file "frag-$t.json" --remote
+            files=$(echo "$files" | jq --slurpfile frag "frag-$t.json" '. + $frag[0]')
+          done
+          jq -n --arg version "$VERSION" --arg releasedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson files "$files" \
+            '{version: $version, releasedAt: $releasedAt, files: $files}' > manifest.json
+          cat manifest.json
+          npx wrangler r2 object put "rdsql-downloads/manifest.json" \
+            --file manifest.json --remote --content-type application/json
+
+  # Bumps the `rdsqlhq/homebrew-rdsql` tap's Cask (version + per-arch
+  # sha256) to match the release manifest.json just published above.
+  # Deploy keys are disabled org-wide for rdsqlhq (confirmed via the API —
+  # not a per-repo setting) and the org's fine-grained-PAT resource-owner
+  # picker never surfaced rdsqlhq either, so this authenticates with a
+  # classic PAT (`repo` scope) instead — broader than ideal (it can reach
+  # every repo the token owner can access, not just this tap), but it's an
+  # encrypted Actions secret on the private rdsql-desktop repo only, never
+  # logged or exposed elsewhere.
+  update-homebrew-cask:
+    needs: publish-manifest
+    runs-on: ubuntu-22.04
+    # Step-level `env:` isn't visible to that same step's own `if:` — the
+    # token has to be set at job level for `if: env.HOMEBREW_TAP_TOKEN != ''`
+    # to see it below.
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Checkout rdsql-desktop
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch manifest.json
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "⚠ CLOUDFLARE_API_TOKEN not set — skipping Homebrew cask bump"
+            exit 0
+          fi
+          npx wrangler r2 object get "rdsql-downloads/manifest.json" --file manifest.json --remote
+          cat manifest.json
+
+      - name: Checkout homebrew-rdsql
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: rdsqlhq/homebrew-rdsql
+          token: ${{ env.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-rdsql
+
+      - name: Update Cask and push
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          if [ ! -f manifest.json ]; then
+            echo "⚠ manifest.json missing — skipping Homebrew cask bump"
+            exit 0
+          fi
+          bash scripts/release/update-homebrew-cask.sh homebrew-rdsql manifest.json
