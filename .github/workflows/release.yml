@@ -40,6 +40,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # tauri.conf.json has a hardcoded updater pubkey (plugins.updater.pubkey),
+      # which makes `tauri build` treat signing as MANDATORY, not optional —
+      # it fails at the very end of the build (after ~20 min compiling
+      # duckdb-rs etc.) with a cryptic minisign decode error if the matching
+      # private key isn't set. Check for that up front instead, so a missing
+      # secret fails in seconds with an actionable message.
+      - name: Verify updater signing key is configured
+        run: |
+          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is not set on this repo. tauri.conf.json's hardcoded updater pubkey makes signing mandatory for every build. Run 'make updater-secrets' locally (uploads ~/.tauri/rdsql-desktop.key) to fix, then re-run this workflow."
+            exit 1
+          fi
+        shell: bash
+
       - name: Install Node.js
         uses: actions/setup-node@v7
         with:
@@ -82,8 +96,9 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Without these the build still succeeds, but no signature and no
-          # latest.json is emitted — so the in-app updater finds nothing.
+          # Mandatory, not optional — see "Verify updater signing key is
+          # configured" above. (PASSWORD may legitimately be empty: the
+          # generated key has no password — see RELEASE.md.)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Compile-time only (read via option_env! in backend.rs). Not a real
