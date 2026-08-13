@@ -7,7 +7,15 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Reuses ci.yml (typecheck, frontend tests, cargo check + test) so a tag
+  # push can't produce and publish installers for code that doesn't pass
+  # the same checks a PR would have to pass. Runs once, on Linux, shared by
+  # all matrix legs below — not duplicated per-platform.
+  test:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: test
     permissions:
       contents: write
     strategy:

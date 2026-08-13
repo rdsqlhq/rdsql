@@ -5,6 +5,10 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Lets release.yml depend on this workflow (`uses: ./.github/workflows/ci.yml`)
+  # so a tag push can't build/publish installers unless these checks pass —
+  # without this trigger, a reusable-workflow `uses:` reference is rejected.
+  workflow_call:
 
 jobs:
   frontend:
