@@ -606,7 +606,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               <ChevronDown className={`w-3 h-3 shrink-0 opacity-70 transition-transform duration-150 ${snippetMenuOpen ? 'rotate-180' : ''}`} />
             </button>
             {snippetMenuOpen && (
-              <div className="absolute z-40 mt-1 left-0 w-56 bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
+              <div className="absolute z-[70] mt-1 left-0 w-56 bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
                 {SQL_SNIPPETS.map((s) => (
                   <button
                     key={s.label}
@@ -641,7 +641,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               <ChevronDown className={`w-3 h-3 shrink-0 opacity-70 transition-transform duration-150 ${historyOpen ? 'rotate-180' : ''}`} />
             </button>
             {historyOpen && (
-              <div className="absolute z-40 mt-1 left-0 w-[420px] max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
+              <div className="absolute z-[70] mt-1 left-0 w-[420px] max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
                 {recentSuccess.length === 0 ? (
                   <div className="px-3 py-2 text-slate-500 italic">No successful queries yet.</div>
                 ) : (
@@ -689,8 +689,13 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
             </button>
             {connMenuOpen && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setConnMenuOpen(false)} />
-                <div className="absolute z-40 mt-1 right-0 w-64 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
+                {/* z-[60]/z-[70] (not the default Tailwind z-30/z-40 scale) —
+                    Monaco's own overlay layers (suggest widget, parameter
+                    hints, etc.) reach z-index values in that range and were
+                    covering this dropdown; matches the z-[60]+ convention
+                    already used for Explorer's context menu / ApplyChangesModal. */}
+                <div className="fixed inset-0 z-[60]" onClick={() => setConnMenuOpen(false)} />
+                <div className="absolute z-[70] mt-1 right-0 w-64 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
                   {connections.length === 0 ? (
                     <div className="px-3 py-2 text-slate-500 italic">No connections configured.</div>
                   ) : (
@@ -751,8 +756,8 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
             </button>
             {dbMenuOpen && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setDbMenuOpen(false)} />
-                <div className="absolute z-40 mt-1 right-0 w-60 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
+                <div className="fixed inset-0 z-[60]" onClick={() => setDbMenuOpen(false)} />
+                <div className="absolute z-[70] mt-1 right-0 w-60 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
                   {loadingTree ? (
                     <div className="px-3 py-2 text-slate-500 italic">Loading…</div>
                   ) : connTree.length === 0 ? (
