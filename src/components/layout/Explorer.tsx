@@ -51,6 +51,8 @@ import {
   Layers,
   Key,
   WifiOff,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { EngineIcon } from '../common/EngineIcon';
 import { TableStructureModal } from '../table/TableStructureModal';
@@ -80,6 +82,8 @@ import { useToastStore, pushDedupedToast } from '../../store/useToastStore';
 import { useHealthStore } from '../../store/useHealthStore';
 import { useStorageStore } from '../../store/useStorageStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
+import { useAuthStore } from '../../store/useAuthStore';
+import { useSyncStore } from '../../store/useSyncStore';
 import { DatabaseConnection, SchemaGroupNode, SchemaTableNode, SchemaColumnNode, ConnectionTag } from '../../core/domain/types';
 import type { RedisDbInfo } from '../../core/redis/types';
 import type { S3ConnectionConfig } from '../../core/storage/domain/types';
@@ -425,6 +429,16 @@ function getColumnTypeIcon(dataType?: string) {
   return <Type className="w-3 h-3 text-blue-400" />;
 }
 
+function timeAgo(iso: string): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export const Explorer: React.FC = () => {
   const {
     connections,
@@ -456,7 +470,7 @@ export const Explorer: React.FC = () => {
   } = useTagStore();
 
   const { openTableDataTab, openSqlTab, openErdTab, openUsersTab, openStorageTab, openRedisBrowserTab, openMongoDocumentsTab, openObjectEditorTab } = useTabStore();
-  const { setActiveView, toggleSidebar, openEncryptedConnectionsModal } = useWorkspaceStore();
+  const { setActiveView, toggleSidebar, openEncryptedConnectionsModal, setSettingsModalOpen } = useWorkspaceStore();
   // Real reachability of the active connection (polled by StatusBar via
   // `pingConnection`) — 'connected' is the only state that should light the
   // green dot. Being merely *selected* doesn't mean the server actually
@@ -464,6 +478,13 @@ export const Explorer: React.FC = () => {
   const connStatus = useHealthStore((s) => s.connStatus);
   const showSystemSchemas = useSettingsStore((s) => s.showSystemSchemas);
   const setShowSystemSchemas = useSettingsStore((s) => s.setShowSystemSchemas);
+  const cloudConfigured = useAuthStore((s) => s.cloudConfigured);
+  const authStatus = useAuthStore((s) => s.status);
+  const syncStatus = useSyncStore((s) => s.status);
+  const syncError = useSyncStore((s) => s.error);
+  const lastSyncedAt = useSyncStore((s) => s.lastSyncedAt);
+  const syncConflicts = useSyncStore((s) => s.conflicts);
+  const syncNow = useSyncStore((s) => s.syncNow);
   const storageConnections = useStorageStore((s) => s.connections);
   const activeStorageConnectionId = useStorageStore((s) => s.activeConnectionId);
   const setActiveStorageConnection = useStorageStore((s) => s.setActiveConnection);
@@ -2675,23 +2696,50 @@ export const Explorer: React.FC = () => {
         )}
       </div>
 
-      {/* Quick Action Footer */}
-      <div className="p-2 border-t border-[#1e293b] flex items-center justify-between bg-[#06090e]">
-        <button
-          onClick={() => {
-            const activeConn = connections.find((c) => c.id === activeConnectionId);
-            if (activeConn && isRedisEngine(activeConn.engine)) {
-              openRedisBrowserTab(activeConn.id);
-            } else {
-              openSqlTab('Untitled.sql', '-- New SQL Query\n', activeConnectionId ?? undefined);
+      {/* Sync Footer — "New SQL Editor"/"Browse Redis Keys" used to live
+          here; removed as redundant (also reachable from Header, the tab
+          bar's own "+", and File-menu equivalents in MainLayout.tsx). Only
+          rendered when cloud sync is actually usable (build has it
+          configured and the user is signed in) — otherwise there's nothing
+          useful for this footer to show, so it just doesn't render. */}
+      {cloudConfigured && authStatus === 'signed-in' && (
+        <div className="p-2 border-t border-[#1e293b] flex items-center gap-1.5 bg-[#06090e]">
+          <button
+            onClick={() => void syncNow()}
+            disabled={syncStatus === 'syncing'}
+            className="flex-1 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Sync connections and settings now"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+            Sync
+          </button>
+          <button
+            onClick={() => setSettingsModalOpen(true, 'account')}
+            className="p-1.5 rounded-lg hover:bg-[#1e293b] transition-colors shrink-0"
+            title={
+              syncStatus === 'error'
+                ? syncError || 'Sync error — click for details'
+                : syncConflicts.length > 0
+                  ? `${syncConflicts.length} sync conflict${syncConflicts.length > 1 ? 's' : ''} — click to resolve`
+                  : lastSyncedAt
+                    ? `Last synced ${timeAgo(lastSyncedAt)} — click for sync settings`
+                    : 'Not synced yet — click for sync settings'
             }
-          }}
-          className="flex-1 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          {isRedisEngine(connections.find((c) => c.id === activeConnectionId)?.engine || '') ? 'Browse Redis Keys' : 'New SQL Editor'}
-        </button>
-      </div>
+          >
+            {syncStatus === 'syncing' ? (
+              <Loader2 className="w-3.5 h-3.5 text-slate-400 animate-spin" />
+            ) : syncStatus === 'error' ? (
+              <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+            ) : syncConflicts.length > 0 ? (
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+            ) : lastSyncedAt ? (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5 text-slate-500" />
+            )}
+          </button>
+        </div>
+      )}
 
       {/* Storage connection edit dialog (opened from an S3 row's Edit action). */}
       {storageDialogOpen && (
