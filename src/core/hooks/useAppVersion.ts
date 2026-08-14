@@ -1,9 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
-
-function inTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-}
+import { inTauri } from '../tauri/ipc';
 
 /**
  * The real running app version, read once from Tauri at runtime — never a

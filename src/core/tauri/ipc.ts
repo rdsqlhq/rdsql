@@ -2,6 +2,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { useQueryLogStore } from '../../store/useQueryStore';
 import type { QuerySource } from '../../store/useQueryStore';
 
+/** True when running inside the actual Tauri app (vs. a plain browser, e.g.
+ *  `make dev-web`). Shared so every "is a native API even reachable here"
+ *  check stays consistent instead of re-implementing the same window check. */
+export function inTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
 /** Optional metadata callers can attach to an invocation so the IPC-layer
  *  logger classifies the query accurately. When omitted, the query is logged
  *  as `source: 'system'` (filtered out unless "Show system" is on). */
@@ -223,7 +230,7 @@ async function doInvoke<T>(command: string, args?: Record<string, unknown>): Pro
   // to the Tauri command — only used by the logger below.
   const { __meta, ...invokeArgs } = (args ?? {}) as Record<string, unknown>;
   try {
-    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    if (inTauri()) {
       const result = await invoke<T>(command, invokeArgs);
       // Single interception point: log EVERY database-hitting command so the
       // SQL log captures all queries (COUNT, pagination, ANALYZE, GRANT,
