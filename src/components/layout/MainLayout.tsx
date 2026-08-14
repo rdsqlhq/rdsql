@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { PanelBottomOpen, PanelLeftOpen, Table as TableIcon } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { inTauri } from '../../core/tauri/ipc';
 import { Header } from './Header';
 import { Explorer } from './Explorer';
 import { EditorTabs } from './EditorTabs';
@@ -93,11 +94,16 @@ export const MainLayout: React.FC = () => {
   // (read before any JS runs, so it can't know the real account) — once the
   // live entitlement resolves, correct the native title bar to match.
   useEffect(() => {
+    if (!inTauri()) return; // browser preview (make dev-web) — no native window to update
     const title = edition === 'pro' ? 'rdSQL - Professional' : 'rdSQL - Community Edition';
     getCurrentWindow()
       .setTitle(title)
-      .catch(() => {
-        // Fallback for non-Tauri browser previews
+      .catch((err) => {
+        // A real failure here (e.g. missing core:window:allow-set-title
+        // capability — see capabilities/default.json) previously looked
+        // identical to "not running in Tauri" and silently hid the title
+        // bar never updating. Surface it instead.
+        console.error('Failed to update window title:', err);
       });
   }, [edition]);
 
