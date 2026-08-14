@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { safeInvoke } from '../core/tauri/ipc';
 import type { AppEdition } from '../core/config/edition';
-import { generatePairingCode, exportSyncKeyForPairing, importSyncKeyFromPairing, type EncryptedField } from '../core/sync/credentialCrypto';
+import { generatePairingCode, exportSyncKeyForPairing, importSyncKeyFromPairing, clearSyncKey, type EncryptedField } from '../core/sync/credentialCrypto';
+import { clearLocalSyncState } from '../core/sync/connectionSync';
 
 /**
  * Account/session state — backed by the rdSQL Cloudflare backend
@@ -130,6 +131,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const result = await safeInvoke<{ syncKey: EncryptedField | null }>('backend_redeem_pairing_code', { code });
       if (result.syncKey) {
+        // Adopting a new sync identity via pairing — any leftover local
+        // version/cursor bookkeeping belongs to whatever account last used
+        // this device, not this one. Clear it first so it doesn't produce
+        // bogus conflicts (or silently skip real changes) against the newly
+        // paired account's data.
+        clearLocalSyncState();
         // The pairing device had sync set up — adopt its key so this device
         // can read/write the same encrypted connection data immediately.
         await importSyncKeyFromPairing(code, result.syncKey);
@@ -156,6 +163,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Best-effort — local state clears regardless of whether the server call succeeded.
     }
     clearHasSession();
+    // The E2E sync key and local version/cursor bookkeeping are NOT scoped
+    // per-account — they live under fixed keychain/localStorage keys. If a
+    // different account signs in on this device afterward, ensureSyncKey()
+    // only generates a fresh key when none exists, so without this it would
+    // silently inherit and start using the previous account's sync key
+    // (their synced connection credentials would be encrypted with a key
+    // this "new" account never actually generated or received via pairing).
+    await clearSyncKey().catch(() => undefined);
+    clearLocalSyncState();
     set({ ...SIGNED_OUT, error: null });
   },
 
