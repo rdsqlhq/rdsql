@@ -408,9 +408,9 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
   // Prompts the native Save dialog and writes there, then binds the tab to
   // that path (so the next plain Save writes back to it directly) and renames
   // the tab to the file's name. Reads the live buffer via the Monaco model —
-  // not the `tab` closure — since `handleSaveAs`/`handleSave` are registered
-  // once as editor commands (Ctrl/Cmd+S) and must stay correct for edits made
-  // long after that registration ran.
+  // not the `tab` closure — since `handleSave` is registered once as an
+  // editor command (Ctrl/Cmd+S) and must stay correct for edits made long
+  // after that registration ran.
   const saveAs = async (sql: string) => {
     const current = useTabStore.getState().tabs.find((t) => t.id === tabId);
     const defaultName = current?.filePath
@@ -450,21 +450,6 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
     }
   };
 
-  /** Always prompts for a new location, even when the tab already has a
-   *  bound file path. */
-  const handleSaveAs = async () => {
-    if (saving) return;
-    setSaving(true);
-    try {
-      const sql = editorRef.current?.getValue() ?? tab?.sql ?? '';
-      await saveAs(sql);
-    } catch (err: any) {
-      pushToast({ severity: 'error', title: 'Could not save file', message: describeFsError(err, 'write') });
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const beforeMount: BeforeMount = (monaco) => {
     monacoRef.current = monaco as MonacoNS;
     // Minimal extra config: keep the built-in SQL language; we only add a
@@ -475,23 +460,66 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
     editorRef.current = editor;
     monacoRef.current = monaco as MonacoNS;
 
-    // Ctrl/Cmd+Enter runs the selection (or whole buffer).
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runSelectionOrAll);
+    // Right-click menu mirrors the toolbar so every toolbar action is also
+    // reachable without leaving the keyboard/editor surface. All share the
+    // 'rdsql' group so they land together as one block above the built-in
+    // cut/copy/paste section. Keybindings live here (not via a separate
+    // addCommand) so each shortcut has exactly one registration.
+    editor.addAction({
+      id: 'run-query',
+      label: 'Run Query',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
+      contextMenuGroupId: 'rdsql',
+      contextMenuOrder: 0,
+      run: () => runSelectionOrAll(),
+    });
 
-    // Ctrl/Cmd+S saves — to the tab's bound file if it has one, else prompts
-    // Save As. Also overrides the browser/OS "Save Page" shortcut.
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => { void handleSave(); });
+    editor.addAction({
+      id: 'stop-query',
+      label: 'Stop Query',
+      contextMenuGroupId: 'rdsql',
+      contextMenuOrder: 1,
+      run: () => { void stopQuery(tabId); },
+    });
 
-    // Right-click "Format SQL" (also Ctrl/Cmd+Shift+F). Formats the selection,
-    // or the whole buffer when nothing is selected.
+    // Formats the selection, or the whole buffer when nothing is selected.
     editor.addAction({
       id: 'format-sql',
       label: 'Format SQL',
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF],
       contextMenuGroupId: 'rdsql',
-      contextMenuOrder: 1,
+      contextMenuOrder: 2,
       run: () => formatSelectionOrAll(),
     });
+
+    editor.addAction({
+      id: 'save-sql',
+      label: 'Save',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      contextMenuGroupId: 'rdsql',
+      contextMenuOrder: 3,
+      run: () => { void handleSave(); },
+    });
+
+    editor.addAction({
+      id: 'refresh-schema',
+      label: 'Refresh Schema',
+      contextMenuGroupId: 'rdsql',
+      contextMenuOrder: 4,
+      run: () => { if (activeConn) refreshSchema(activeConn.id); },
+    });
+
+    // Only registered when a provider is configured — same gating as the
+    // toolbar button, so the menu never shows a dead entry.
+    if (aiReady) {
+      editor.addAction({
+        id: 'ask-ai',
+        label: 'Ask AI',
+        contextMenuGroupId: 'rdsql',
+        contextMenuOrder: 5,
+        run: () => setAIPanelOpen(true),
+      });
+    }
 
     // Register our SQL completion provider exactly once per Monaco instance.
     // It reads live schema data from the module-level sharedSchemaRef, which
@@ -528,70 +556,79 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       {/* Toolbar */}
       <div className="h-10 shrink-0 border-b border-[#1e293b] px-3 bg-[#0a0f18] flex items-center justify-between gap-2 shadow-sm shadow-black/20 z-10 relative overflow-x-auto">
         <div className="flex items-center gap-2 flex-nowrap shrink-0">
-          <button
-            onClick={runSelectionOrAll}
-            disabled={running || !(tab?.sql ?? '').trim()}
-            title="Run (Ctrl/Cmd+Enter) — runs the selection if any, else the whole buffer"
-            className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50 shadow-md shadow-emerald-600/30 whitespace-nowrap shrink-0"
-          >
-            <Play className="w-3.5 h-3.5 shrink-0 fill-current" />
-            Run
-          </button>
-          <button
-            onClick={() => stopQuery(tabId)}
-            disabled={!running}
-            title="Stop the running query"
-            className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 active:bg-red-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-40 shadow-md shadow-red-600/20 disabled:shadow-none whitespace-nowrap shrink-0"
-          >
-            <Square className="w-3.5 h-3.5 shrink-0 fill-current" />
-            Stop
-          </button>
+          {/* Run/Stop group — a single pill so the two mutually-exclusive
+              actions (only one is ever enabled at a time) read as one
+              control instead of two independent floating buttons. */}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[#0d1420] border border-[#1e293b] shrink-0">
+            <button
+              onClick={runSelectionOrAll}
+              disabled={running || !(tab?.sql ?? '').trim()}
+              title="Run (Ctrl/Cmd+Enter) — runs the selection if any, else the whole buffer"
+              className="p-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white flex items-center justify-center transition-colors disabled:bg-transparent disabled:text-slate-600 disabled:shadow-none shadow-md shadow-emerald-600/30"
+            >
+              <Play className="w-3.5 h-3.5 shrink-0 fill-current" />
+            </button>
+            <button
+              onClick={() => stopQuery(tabId)}
+              disabled={!running}
+              title="Stop the running query"
+              className="p-1.5 rounded-md bg-red-600 hover:bg-red-500 active:bg-red-700 text-white flex items-center justify-center transition-colors disabled:bg-transparent disabled:text-slate-600 disabled:shadow-none shadow-md shadow-red-600/20"
+            >
+              <Square className="w-3.5 h-3.5 shrink-0 fill-current" />
+            </button>
+          </div>
 
           <div className="h-5 w-px bg-[#1e293b] mx-1" />
 
           {/* Save — writes to the tab's bound file, or prompts Save As for a
-              tab that's never been saved to disk. Long-press-free Save As is
-              a separate small button so both stay one click away. */}
+              tab that's never been saved to disk. */}
           <button
             onClick={handleSave}
             disabled={saving}
             title={tab?.filePath ? `Save (Ctrl/Cmd+S) — ${tab.filePath}` : 'Save (Ctrl/Cmd+S) — choose a file'}
-            className="px-2 py-1 rounded-lg bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+            className="p-1.5 rounded-lg bg-[#0d1420] border border-[#1e293b] hover:bg-[#1e293b] text-slate-300 hover:text-white flex items-center justify-center transition-colors disabled:opacity-50 shrink-0"
           >
             <SaveIcon className={`w-3.5 h-3.5 shrink-0 ${saving ? 'animate-pulse' : ''}`} />
-            Save
-          </button>
-          <button
-            onClick={handleSaveAs}
-            disabled={saving}
-            title="Save As — always choose a new file"
-            className="px-1.5 py-1 rounded-lg bg-[#141e33] hover:bg-[#1e293b] text-slate-400 hover:text-white text-[10px] font-semibold transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
-          >
-            As…
           </button>
 
           <div className="h-5 w-px bg-[#1e293b] mx-1" />
 
-          {/* Format SQL */}
-          <button
-            onClick={formatSelectionOrAll}
-            className="px-2 py-1 rounded-lg bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-            title="Format SQL (Ctrl/Cmd+Shift+F) — selection or whole buffer"
-          >
-            <Wand2 className="w-3.5 h-3.5 shrink-0" />
-            Format
-          </button>
+          {/* Format + Refresh schema — grouped as "editor utilities" (both
+              act on the buffer/schema, neither is a distinct feature the way
+              Ask AI is, so it keeps its own accented button below). */}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[#0d1420] border border-[#1e293b] shrink-0">
+            <button
+              onClick={formatSelectionOrAll}
+              className="p-1.5 rounded-md hover:bg-[#1e293b] text-slate-300 hover:text-white flex items-center justify-center transition-colors"
+              title="Format SQL (Ctrl/Cmd+Shift+F) — selection or whole buffer"
+            >
+              <Wand2 className="w-3.5 h-3.5 shrink-0" />
+            </button>
+            {/* Refresh schema (re-fetch the connection's tables/columns so
+                autocomplete reflects newly created/dropped objects). */}
+            <button
+              onClick={() => activeConn && refreshSchema(activeConn.id)}
+              disabled={!activeConn || loadingTree}
+              className="p-1.5 rounded-md hover:bg-[#1e293b] text-slate-300 hover:text-white flex items-center justify-center transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-300"
+              title="Refresh schema for autocomplete"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${loadingTree ? 'animate-spin text-cyan-400' : ''}`} />
+            </button>
+          </div>
 
           {/* Ask AI — the single AI entry point on the editor. Opens the
               assistant panel so the user can describe what they want in plain
               language (e.g. "create an event that runs when a customer adds a
               product") and have SQL drafted against the live schema, then
               inserted back into this editor. Covers generate + improve + fix
-              via the same chat. Hidden when no provider is configured. */}
+              via the same chat. Hidden when no provider is configured. Kept
+              standalone (not folded into the neutral utilities group above)
+              — its violet accent is deliberate, calling out the AI entry
+              point rather than blending it in with plain editor actions. */}
           {aiReady && (
             <button
               onClick={() => setAIPanelOpen(!isAIPanelOpen)}
-              className={`px-2 py-1 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+              className={`p-1.5 rounded-lg border flex items-center justify-center transition-colors shrink-0 ${
                 isAIPanelOpen
                   ? 'bg-violet-600/30 border-violet-500/50 text-violet-100'
                   : 'bg-violet-600/15 hover:bg-violet-600/25 border-violet-500/30 text-violet-300 hover:text-violet-200'
@@ -599,24 +636,14 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               title="Ask AI — open the assistant panel to draft, improve, or fix this SQL in plain language"
             >
               <Sparkles className="w-3.5 h-3.5 shrink-0" />
-              Ask AI
             </button>
           )}
 
-          {/* Refresh schema (re-fetch the connection's tables/columns so
-              autocomplete reflects newly created/dropped objects). */}
-          <button
-            onClick={() => activeConn && refreshSchema(activeConn.id)}
-            disabled={!activeConn || loadingTree}
-            className="p-1.5 rounded-lg bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white text-xs font-semibold flex items-center justify-center transition-colors disabled:opacity-40 disabled:hover:bg-[#141e33] disabled:hover:text-slate-300"
-            title="Refresh schema for autocomplete"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${loadingTree ? 'animate-spin text-cyan-400' : ''}`} />
-          </button>
-
           <div className="h-5 w-px bg-[#1e293b] mx-1" />
 
-          {/* Snippets dropdown */}
+          {/* Snippets + History — grouped as "insert helpers" (both drop
+              text into the editor at the cursor). */}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[#0d1420] border border-[#1e293b] shrink-0">
           <div className="relative">
             <button
               ref={snippetBtnRef}
@@ -626,14 +653,13 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
                 setHistoryOpen(false);
                 if (next) openMenuFrom(snippetBtnRef, 'left');
               }}
-              className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-                snippetMenuOpen ? 'bg-[#1e293b] text-white' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white'
+              className={`p-1.5 rounded-md flex items-center justify-center gap-0.5 transition-colors ${
+                snippetMenuOpen ? 'bg-[#1e293b] text-white' : 'hover:bg-[#1e293b] text-slate-300 hover:text-white'
               }`}
               title="Insert a SQL snippet"
             >
               <Code2 className="w-3.5 h-3.5 shrink-0" />
-              Snippets
-              <ChevronDown className={`w-3 h-3 shrink-0 opacity-70 transition-transform duration-150 ${snippetMenuOpen ? 'rotate-180' : ''}`} />
+              <ChevronDown className={`w-2.5 h-2.5 shrink-0 opacity-70 transition-transform duration-150 ${snippetMenuOpen ? 'rotate-180' : ''}`} />
             </button>
             {snippetMenuOpen && menuRect && createPortal(
               <>
@@ -661,7 +687,6 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
             )}
           </div>
 
-          {/* History dropdown */}
           <div className="relative">
             <button
               ref={historyBtnRef}
@@ -671,14 +696,13 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
                 setSnippetMenuOpen(false);
                 if (next) openMenuFrom(historyBtnRef, 'left');
               }}
-              className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-                historyOpen ? 'bg-[#1e293b] text-white' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white'
+              className={`p-1.5 rounded-md flex items-center justify-center gap-0.5 transition-colors ${
+                historyOpen ? 'bg-[#1e293b] text-white' : 'hover:bg-[#1e293b] text-slate-300 hover:text-white'
               }`}
               title="Recent successful queries"
             >
               <HistoryIcon className="w-3.5 h-3.5 shrink-0" />
-              History
-              <ChevronDown className={`w-3 h-3 shrink-0 opacity-70 transition-transform duration-150 ${historyOpen ? 'rotate-180' : ''}`} />
+              <ChevronDown className={`w-2.5 h-2.5 shrink-0 opacity-70 transition-transform duration-150 ${historyOpen ? 'rotate-180' : ''}`} />
             </button>
             {historyOpen && menuRect && createPortal(
               <>
@@ -712,10 +736,12 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               document.body
             )}
           </div>
+          </div>
         </div>
 
-        {/* Connection + database pickers */}
-        <div className="flex items-center gap-1.5 flex-nowrap shrink-0">
+        {/* Connection + database pickers — grouped in the same pill style as
+            the left-side toolbar clusters, for visual consistency. */}
+        <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[#0d1420] border border-[#1e293b] flex-nowrap shrink-0">
           {/* Connection dropdown */}
           <div className="relative">
             <button
@@ -728,8 +754,8 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
                 setHistoryOpen(false);
                 if (next) openMenuFrom(connBtnRef, 'right');
               }}
-              className={`px-2 py-1 rounded-lg text-[11px] font-mono flex items-center gap-1.5 transition-colors max-w-[180px] ${
-                connMenuOpen ? 'bg-[#1e293b] text-white ring-1 ring-blue-500/30' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300'
+              className={`px-2 py-1 rounded-md text-[11px] font-mono flex items-center gap-1.5 transition-colors max-w-[180px] ${
+                connMenuOpen ? 'bg-[#1e293b] text-white ring-1 ring-blue-500/30' : 'hover:bg-[#1e293b] text-slate-300'
               }`}
               title="Select connection"
             >

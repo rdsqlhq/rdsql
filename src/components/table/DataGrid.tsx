@@ -470,19 +470,20 @@ export const DataGrid: React.FC<DataGridProps> = ({
     return () => document.removeEventListener('mousedown', onDown);
   }, [colMenuOpen]);
 
-  // Refs to each header <th> so we can snapshot auto-fit widths once after the
-  // first data render, then freeze layout (prevents scroll-induced wobble).
-  const thRefs = useRef<(HTMLTableCellElement | null)[]>([]);
   useEffect(() => {
     if (didLockRef.current) return;
     if (!visibleColumns.length || !rows.length) return;
-    // Snapshot on the next frame so the browser has laid out the auto-fit
-    // columns with real content.
+    // Snapshot on the next frame so the browser has laid out the visible
+    // rows this measurement reads from. Widths come from measureColumn's
+    // canvas text measurement (same one double-click-to-autofit uses) rather
+    // than the DOM's table-auto offsetWidth — table-auto stretches columns
+    // to fill any remaining table width, which produced columns wider than
+    // their actual content on first load.
     const id = requestAnimationFrame(() => {
       const m = new Map<string, number>();
-      visibleColumns.forEach((c, i) => {
-        const el = thRefs.current[i];
-        if (el && el.offsetWidth > 0) m.set(c.name, el.offsetWidth);
+      visibleColumns.forEach((c) => {
+        const w = measureColumn(c.name);
+        if (w && w > 0) m.set(c.name, w);
       });
       if (m.size) {
         lockWidths(m);
@@ -490,7 +491,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
       }
     });
     return () => cancelAnimationFrame(id);
-  }, [visibleColumns, rows.length, lockWidths]);
+  }, [visibleColumns, rows.length, lockWidths, measureColumn]);
 
   // ── Inline edit helpers ───────────────────────────────────────────────────
   // Track the original (pre-edit) value so commitEdit can skip staging a
@@ -590,7 +591,6 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 return (
                   <th
                     key={col.name}
-                    ref={(el) => { thRefs.current[colIdx] = el; }}
                     onClick={() => toggleSort(colIdx)}
                     style={{ width: w }}
                     className={`relative px-3 py-2 border-r border-[#1e293b] ${w ? '' : 'min-w-[140px]'} cursor-pointer select-none hover:bg-[#141e33] transition-colors ${

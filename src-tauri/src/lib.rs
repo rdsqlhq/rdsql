@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder, PredefinedMenuItem};
-use tauri::{Emitter, Manager, RunEvent};
+use tauri::{Emitter, Manager};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use tauri::RunEvent;
 use tauri_plugin_deep_link::DeepLinkExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
