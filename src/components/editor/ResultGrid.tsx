@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useTabStore } from '../../store/useTabStore';
 import { useConnectionStore } from '../../store/useConnectionStore';
+import { useToastStore } from '../../store/useToastStore';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import {
@@ -134,6 +135,7 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
   const [modalEditCell, setModalEditCell] = useState<{ row: RowData; col: string; dataType?: string } | null>(null);
   const [pendingUpdates, setPendingUpdates] = useState<Map<RowData, Record<string, string | null>>>(new Map());
   const [pendingDeletes, setPendingDeletes] = useState<Set<RowData>>(new Set());
+  const pushToast = useToastStore((s) => s.push);
   const [newRows, setNewRows] = useState<NewRow[]>([]);
 
   // Reset staged changes whenever the result set's rows change (re-run/refresh).
@@ -270,7 +272,10 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
         .map((colName) => {
           const ci = result.columns.findIndex((c) => c.name === colName);
           const val = ci >= 0 ? row[ci] : null;
-          return `${q(colName)} = ${sqlLiteral(val)}`;
+          // `col = NULL` never matches in SQL (three-valued logic) — a row
+          // whose identifying column is NULL would silently match zero rows,
+          // so the edit looks applied (no error) but reverts on refresh.
+          return val === null || val === undefined ? `${q(colName)} IS NULL` : `${q(colName)} = ${sqlLiteral(val)}`;
         })
         .join(' AND ');
 
@@ -321,13 +326,19 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
     setApplyError(null);
 
     let failure: string | null = null;
+    let unmatchedCount = 0;
     for (const [stmtIdx, change] of changes.entries()) {
       try {
-        await safeInvoke<{ affected_rows?: number }>('execute_query', {
+        const res = await safeInvoke<{ affected_rows?: number }>('execute_query', {
           request: { config: queryConfig, sql: change.sql },
           queryId: `crud_${editableTable.name}_${stmtIdx}_${Date.now()}`,
           __meta: { source: 'table' },
         });
+        // A no-op UPDATE/DELETE (WHERE matched nothing) doesn't throw — it
+        // looks identical to success unless we check affected_rows.
+        if ((change.kind === 'update' || change.kind === 'delete') && res.affected_rows === 0) {
+          unmatchedCount += 1;
+        }
       } catch (err: any) {
         const errMsg = err?.message || String(err);
         failure = errMsg;
@@ -339,6 +350,14 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
       setApplyError(failure);
       setApplying(false);
       return;
+    }
+
+    if (unmatchedCount > 0) {
+      pushToast({
+        severity: 'warning',
+        title: `${unmatchedCount} change${unmatchedCount > 1 ? 's' : ''} matched no row`,
+        message: 'The row may have changed or been deleted since it was loaded. Nothing was saved for it — refresh and try again.',
+      });
     }
 
     // Commit succeeded: clear staged state, close modal, and refresh this set.

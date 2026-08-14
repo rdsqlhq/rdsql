@@ -44,6 +44,7 @@ import { parseDbError, errorKindLabel, errorKindColor, formatDbErrorTrace } from
 import { QueryResultData } from '../../core/domain/types';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import { copyToClipboard } from '../../core/utils/clipboard';
+import { useToastStore } from '../../store/useToastStore';
 
 const PAGE_SIZE = 100;
 
@@ -219,6 +220,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
   const [newRowModal, setNewRowModal] = useState<{ tempId: string; col: string; dataType?: string } | null>(null);
   const [pendingUpdates, setPendingUpdates] = useState<Map<RowData, Record<string, string | null>>>(new Map());
   const [pendingDeletes, setPendingDeletes] = useState<Set<RowData>>(new Set());
+  const pushToast = useToastStore((s) => s.push);
   const [newRows, setNewRows] = useState<NewRow[]>([]);
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -804,7 +806,10 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
         .map((colName) => {
           const ci = result.columns.findIndex((c) => c.name === colName);
           const val = ci >= 0 ? row[ci] : null;
-          return `${q(colName)} = ${sqlLiteral(val)}`;
+          // `col = NULL` never matches in SQL (three-valued logic) — a row
+          // whose identifying column is NULL would silently match zero rows,
+          // so the edit looks applied (no error) but reverts on refresh.
+          return val === null || val === undefined ? `${q(colName)} IS NULL` : `${q(colName)} = ${sqlLiteral(val)}`;
         })
         .join(' AND ');
 
@@ -836,13 +841,23 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
     // via `__meta: { source: 'table' }`, so it shows up in Query Log & History
     // (and, if it fails, in the Errors tab) — not just the refresh SELECT.
     let failure: string | null = null;
+    let unmatchedCount = 0;
     for (const [stmtIdx, stmt] of stmts.entries()) {
       try {
-        await safeInvoke<{ affected_rows?: number }>('execute_query', {
+        const res = await safeInvoke<{ affected_rows?: number }>('execute_query', {
           request: { config: queryConfig, sql: stmt },
           queryId: `crud_${tab.tableName}_${stmtIdx}_${Date.now()}`,
           __meta: { source: 'table' },
         });
+        // A no-op UPDATE/DELETE (WHERE matched nothing) doesn't throw — it
+        // looks identical to success unless we check affected_rows. Without
+        // this, a stale/mismatched WHERE clause (e.g. an editable result
+        // grid whose data shifted, or an identifying column that's NULL)
+        // silently discards the edit: no error shown, and the refresh below
+        // just re-displays the unchanged row.
+        if ((stmt.startsWith('UPDATE ') || stmt.startsWith('DELETE ')) && res.affected_rows === 0) {
+          unmatchedCount += 1;
+        }
       } catch (err: any) {
         const errMsg = err?.message || String(err);
         failure = errMsg;
@@ -854,6 +869,14 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
       setApplyError(failure);
       setApplying(false);
       return;
+    }
+
+    if (unmatchedCount > 0) {
+      pushToast({
+        severity: 'warning',
+        title: `${unmatchedCount} change${unmatchedCount > 1 ? 's' : ''} matched no row`,
+        message: 'The row may have changed or been deleted since it was loaded. Nothing was saved for it — refresh and try again.',
+      });
     }
 
     setPendingUpdates(new Map());
