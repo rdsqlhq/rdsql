@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import Editor, { type OnMount, type BeforeMount } from '@monaco-editor/react';
 import type { editor as MonacoEditorNS, languages as MonacoLanguagesNS } from 'monaco-editor';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -272,6 +273,32 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [connMenuOpen, setConnMenuOpen] = useState(false);
   const [dbMenuOpen, setDbMenuOpen] = useState(false);
+
+  // The 4 toolbar dropdowns below render into a document.body portal rather
+  // than as normal absolute-positioned children: the toolbar has
+  // overflow-x-auto (needed so its buttons can scroll horizontally on
+  // narrow windows), and per the CSS Overflow spec setting overflow-x to
+  // anything but `visible` forces overflow-y to compute as `auto` too —
+  // there's no combination of overflow-x/overflow-y that lets content
+  // clip horizontally but not vertically. A portal sidesteps the toolbar's
+  // box (and any z-index/stacking-context fights with Monaco's own overlay
+  // layers) entirely, mirroring the pattern already used by
+  // RelationCellInput.tsx elsewhere in the app.
+  const snippetBtnRef = useRef<HTMLButtonElement>(null);
+  const historyBtnRef = useRef<HTMLButtonElement>(null);
+  const connBtnRef = useRef<HTMLButtonElement>(null);
+  const dbBtnRef = useRef<HTMLButtonElement>(null);
+  const [menuRect, setMenuRect] = useState<{ top: number; left?: number; right?: number } | null>(null);
+
+  function openMenuFrom(btnRef: React.RefObject<HTMLButtonElement | null>, align: 'left' | 'right') {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) { setMenuRect(null); return; }
+    setMenuRect(
+      align === 'right'
+        ? { top: r.bottom + 4, right: window.innerWidth - r.right }
+        : { top: r.bottom + 4, left: r.left }
+    );
+  }
 
   // Schema for THIS tab's connection comes from the shared per-connection
   // cache in the store (populated by the Explorer, so editor and Explorer
@@ -592,9 +619,12 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
           {/* Snippets dropdown */}
           <div className="relative">
             <button
+              ref={snippetBtnRef}
               onClick={() => {
-                setSnippetMenuOpen((v) => !v);
+                const next = !snippetMenuOpen;
+                setSnippetMenuOpen(next);
                 setHistoryOpen(false);
+                if (next) openMenuFrom(snippetBtnRef, 'left');
               }}
               className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
                 snippetMenuOpen ? 'bg-[#1e293b] text-white' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white'
@@ -605,31 +635,41 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               Snippets
               <ChevronDown className={`w-3 h-3 shrink-0 opacity-70 transition-transform duration-150 ${snippetMenuOpen ? 'rotate-180' : ''}`} />
             </button>
-            {snippetMenuOpen && (
-              <div className="absolute z-40 mt-1 left-0 w-56 bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
-                {SQL_SNIPPETS.map((s) => (
-                  <button
-                    key={s.label}
-                    onClick={() => {
-                      insertAtCursor(s.insertText);
-                      setSnippetMenuOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex flex-col"
-                  >
-                    <span className="text-slate-200 font-mono">{s.label}</span>
-                    <span className="text-[10px] text-slate-500">{s.detail}</span>
-                  </button>
-                ))}
-              </div>
+            {snippetMenuOpen && menuRect && createPortal(
+              <>
+                <div className="fixed inset-0 z-[99998]" onClick={() => setSnippetMenuOpen(false)} />
+                <div
+                  style={{ position: 'fixed', top: menuRect.top, left: menuRect.left, zIndex: 99999 }}
+                  className="w-56 bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs"
+                >
+                  {SQL_SNIPPETS.map((s) => (
+                    <button
+                      key={s.label}
+                      onClick={() => {
+                        insertAtCursor(s.insertText);
+                        setSnippetMenuOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex flex-col"
+                    >
+                      <span className="text-slate-200 font-mono">{s.label}</span>
+                      <span className="text-[10px] text-slate-500">{s.detail}</span>
+                    </button>
+                  ))}
+                </div>
+              </>,
+              document.body
             )}
           </div>
 
           {/* History dropdown */}
           <div className="relative">
             <button
+              ref={historyBtnRef}
               onClick={() => {
-                setHistoryOpen((v) => !v);
+                const next = !historyOpen;
+                setHistoryOpen(next);
                 setSnippetMenuOpen(false);
+                if (next) openMenuFrom(historyBtnRef, 'left');
               }}
               className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
                 historyOpen ? 'bg-[#1e293b] text-white' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300 hover:text-white'
@@ -640,29 +680,36 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               History
               <ChevronDown className={`w-3 h-3 shrink-0 opacity-70 transition-transform duration-150 ${historyOpen ? 'rotate-180' : ''}`} />
             </button>
-            {historyOpen && (
-              <div className="absolute z-40 mt-1 left-0 w-[420px] max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
-                {recentSuccess.length === 0 ? (
-                  <div className="px-3 py-2 text-slate-500 italic">No successful queries yet.</div>
-                ) : (
-                  recentSuccess.map((l) => (
-                    <button
-                      key={l.id}
-                      onClick={() => {
-                        insertAtCursor(l.sql);
-                        setHistoryOpen(false);
-                      }}
-                      className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex flex-col gap-0.5"
-                      title="Insert into editor"
-                    >
-                      <span className="text-slate-300 font-mono truncate">{l.sql}</span>
-                      <span className="text-[10px] text-slate-500">
-                        {l.database} · {l.durationMs}ms · {l.rowsAffected} rows · {l.executedAt}
-                      </span>
-                    </button>
-                  ))
-                )}
-              </div>
+            {historyOpen && menuRect && createPortal(
+              <>
+                <div className="fixed inset-0 z-[99998]" onClick={() => setHistoryOpen(false)} />
+                <div
+                  style={{ position: 'fixed', top: menuRect.top, left: menuRect.left, zIndex: 99999 }}
+                  className="w-[420px] max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs"
+                >
+                  {recentSuccess.length === 0 ? (
+                    <div className="px-3 py-2 text-slate-500 italic">No successful queries yet.</div>
+                  ) : (
+                    recentSuccess.map((l) => (
+                      <button
+                        key={l.id}
+                        onClick={() => {
+                          insertAtCursor(l.sql);
+                          setHistoryOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex flex-col gap-0.5"
+                        title="Insert into editor"
+                      >
+                        <span className="text-slate-300 font-mono truncate">{l.sql}</span>
+                        <span className="text-[10px] text-slate-500">
+                          {l.database} · {l.durationMs}ms · {l.rowsAffected} rows · {l.executedAt}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </>,
+              document.body
             )}
           </div>
         </div>
@@ -672,11 +719,14 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
           {/* Connection dropdown */}
           <div className="relative">
             <button
+              ref={connBtnRef}
               onClick={() => {
-                setConnMenuOpen((v) => !v);
+                const next = !connMenuOpen;
+                setConnMenuOpen(next);
                 setDbMenuOpen(false);
                 setSnippetMenuOpen(false);
                 setHistoryOpen(false);
+                if (next) openMenuFrom(connBtnRef, 'right');
               }}
               className={`px-2 py-1 rounded-lg text-[11px] font-mono flex items-center gap-1.5 transition-colors max-w-[180px] ${
                 connMenuOpen ? 'bg-[#1e293b] text-white ring-1 ring-blue-500/30' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300'
@@ -687,10 +737,13 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               <span className="truncate">{activeConn?.name ?? 'no connection'}</span>
               <ChevronDown className={`w-3 h-3 opacity-70 shrink-0 transition-transform duration-150 ${connMenuOpen ? 'rotate-180' : ''}`} />
             </button>
-            {connMenuOpen && (
+            {connMenuOpen && menuRect && createPortal(
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setConnMenuOpen(false)} />
-                <div className="absolute z-40 mt-1 right-0 w-64 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
+                <div className="fixed inset-0 z-[99998]" onClick={() => setConnMenuOpen(false)} />
+                <div
+                  style={{ position: 'fixed', top: menuRect.top, right: menuRect.right, zIndex: 99999 }}
+                  className="w-64 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs"
+                >
                   {connections.length === 0 ? (
                     <div className="px-3 py-2 text-slate-500 italic">No connections configured.</div>
                   ) : (
@@ -720,18 +773,22 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
                     })
                   )}
                 </div>
-              </>
+              </>,
+              document.body
             )}
           </div>
 
           {/* Database / schema dropdown */}
           <div className="relative">
             <button
+              ref={dbBtnRef}
               onClick={() => {
-                setDbMenuOpen((v) => !v);
+                const next = !dbMenuOpen;
+                setDbMenuOpen(next);
                 setConnMenuOpen(false);
                 setSnippetMenuOpen(false);
                 setHistoryOpen(false);
+                if (next) openMenuFrom(dbBtnRef, 'right');
               }}
               disabled={!activeConn}
               className={`px-2 py-1 rounded-lg text-[11px] font-mono flex items-center gap-1.5 transition-colors max-w-[180px] disabled:opacity-40 disabled:cursor-not-allowed ${
@@ -749,10 +806,13 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
               </span>
               <ChevronDown className={`w-3 h-3 opacity-70 shrink-0 transition-transform duration-150 ${dbMenuOpen ? 'rotate-180' : ''}`} />
             </button>
-            {dbMenuOpen && (
+            {dbMenuOpen && menuRect && createPortal(
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setDbMenuOpen(false)} />
-                <div className="absolute z-40 mt-1 right-0 w-60 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs">
+                <div className="fixed inset-0 z-[99998]" onClick={() => setDbMenuOpen(false)} />
+                <div
+                  style={{ position: 'fixed', top: menuRect.top, right: menuRect.right, zIndex: 99999 }}
+                  className="w-60 max-h-80 overflow-y-auto bg-[#0a0f18] border border-[#1e293b] rounded-xl shadow-2xl py-1 text-xs"
+                >
                   {loadingTree ? (
                     <div className="px-3 py-2 text-slate-500 italic">Loading…</div>
                   ) : connTree.length === 0 ? (
@@ -793,7 +853,8 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
                     </>
                   )}
                 </div>
-              </>
+              </>,
+              document.body
             )}
           </div>
         </div>
