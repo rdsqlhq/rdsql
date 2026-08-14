@@ -20,9 +20,21 @@ interface SyncState {
   keepRemote: (connectionId: string) => Promise<void>;
 }
 
+// Persisted (not just in-memory) so "Last synced …" survives an app
+// restart instead of going blank every launch even though sync genuinely
+// ran moments before quitting. Same account-scoping caveat as
+// connectionSync.ts's version/cursor keys — see resetLocalSyncDisplayState
+// below, called from useAuthStore.signOut().
+const LAST_SYNCED_KEY = 'rdsql_sync_last_synced_at_v1';
+
+export function resetLocalSyncDisplayState(): void {
+  localStorage.removeItem(LAST_SYNCED_KEY);
+  useSyncStore.setState({ lastSyncedAt: null, status: 'idle', error: null, conflicts: [] });
+}
+
 export const useSyncStore = create<SyncState>((set, get) => ({
   status: 'idle',
-  lastSyncedAt: null,
+  lastSyncedAt: localStorage.getItem(LAST_SYNCED_KEY),
   error: null,
   conflicts: [],
 
@@ -40,9 +52,11 @@ export const useSyncStore = create<SyncState>((set, get) => ({
     try {
       const { conflicts } = await pushAllConnections();
       await pullAllChanges();
+      const now = new Date().toISOString();
+      localStorage.setItem(LAST_SYNCED_KEY, now);
       set({
         status: 'synced',
-        lastSyncedAt: new Date().toISOString(),
+        lastSyncedAt: now,
         conflicts,
       });
       if (conflicts.length === 0) {

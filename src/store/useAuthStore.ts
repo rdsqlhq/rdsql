@@ -3,6 +3,7 @@ import { safeInvoke } from '../core/tauri/ipc';
 import type { AppEdition } from '../core/config/edition';
 import { generatePairingCode, exportSyncKeyForPairing, importSyncKeyFromPairing, clearSyncKey, type EncryptedField } from '../core/sync/credentialCrypto';
 import { clearLocalSyncState } from '../core/sync/connectionSync';
+import { resetLocalSyncDisplayState } from './useSyncStore';
 
 /**
  * Account/session state — backed by the rdSQL Cloudflare backend
@@ -137,6 +138,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // bogus conflicts (or silently skip real changes) against the newly
         // paired account's data.
         clearLocalSyncState();
+        resetLocalSyncDisplayState();
         // The pairing device had sync set up — adopt its key so this device
         // can read/write the same encrypted connection data immediately.
         await importSyncKeyFromPairing(code, result.syncKey);
@@ -172,6 +174,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     // this "new" account never actually generated or received via pairing).
     await clearSyncKey().catch(() => undefined);
     clearLocalSyncState();
+    resetLocalSyncDisplayState();
     set({ ...SIGNED_OUT, error: null });
   },
 
