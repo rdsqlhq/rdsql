@@ -622,9 +622,8 @@ const ReadOnlyGrid: React.FC<{
     return () => document.removeEventListener('mousedown', onDown);
   }, [colMenuOpen]);
 
-  // thRefs + didLockRef for the auto-fit snapshot (effect is wired after the
-  // resize hook is created, below).
-  const thRefs = React.useRef<(HTMLTableCellElement | null)[]>([]);
+  // didLockRef prevents re-measuring column widths after the first snapshot
+  // (effect is wired after the resize hook is created, below).
   const didLockRef = React.useRef(false);
 
   const filterColumns: FilterColumn[] = useMemo(
@@ -686,15 +685,19 @@ const ReadOnlyGrid: React.FC<{
   const hasCustomWidths = colWidths.size > 0;
   const useFixedLayout = hasCustomWidths || isLocked;
 
-  // Snapshot auto-fit widths once after first data render, then freeze layout.
+  // Snapshot auto-fit widths once after first data render, then freeze
+  // layout. Widths come from measureColumn's canvas text measurement (same
+  // one double-click-to-autofit uses) rather than the DOM's table-auto
+  // offsetWidth — table-auto stretches columns to fill any remaining table
+  // width, which produced columns wider than their actual content.
   React.useEffect(() => {
     if (didLockRef.current) return;
     if (!visibleColumns.length || !allRows.length) return;
     const id = requestAnimationFrame(() => {
       const m = new Map<string, number>();
-      visibleColumns.forEach((c, i) => {
-        const el = thRefs.current[i];
-        if (el && el.offsetWidth > 0) m.set(c.name, el.offsetWidth);
+      visibleColumns.forEach((c) => {
+        const w = measureColumn(c.name);
+        if (w && w > 0) m.set(c.name, w);
       });
       if (m.size) {
         lockWidths(m);
@@ -702,7 +705,7 @@ const ReadOnlyGrid: React.FC<{
       }
     });
     return () => cancelAnimationFrame(id);
-  }, [visibleColumns, allRows.length, lockWidths]);
+  }, [visibleColumns, allRows.length, lockWidths, measureColumn]);
 
   const activeFilterCount = filterConditions.filter(
     (c) => c.operator === 'is_null' || c.operator === 'is_not_null' || c.value.trim() !== '',
@@ -840,7 +843,6 @@ const ReadOnlyGrid: React.FC<{
                 return (
                   <th
                     key={col.name}
-                    ref={(el) => { thRefs.current[colIdx] = el; }}
                     onClick={() => toggleSort(colIdx)}
                     style={{ width: w }}
                     className={`relative py-1.5 px-3 border-r border-[#1e293b] ${w ? '' : 'min-w-[120px]'} whitespace-nowrap cursor-pointer select-none hover:bg-[#141e33] transition-colors ${
