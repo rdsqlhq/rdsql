@@ -23,12 +23,14 @@
 
 It provides a flagship developer experience for:
 - 🗄️ **Database Development & Execution** — SQL editor, table explorer, query results grid
+- 🔑 **Redis Browser** (key browsing by type, TTL, inline value editing)
+- 🍃 **MongoDB Explorer** (document browser, aggregation pipeline builder, index management)
 - 📊 **Visual ERD Studio** (Interactive schema canvas powered by `@xyflow/react`)
 - 🔀 **Migration Studio** (Environment schema diffing & versioning)
 - 💾 **Native Backup & Restore** (High-performance compressed SQL dumps using Rust workers)
 - ☁️ **S3-Compatible Object Storage Browser** (AWS S3, Cloudflare R2, MinIO)
 - 🤖 **AI Assistant** (SQL generation, query optimization, and schema explanation)
-- 🔄 **Encrypted Cross-Device Sync** (connections and credentials, end-to-end encrypted)
+- 🔄 **Encrypted Cross-Device Sync** (connections, credentials, and app/AI settings — end-to-end encrypted)
 
 ---
 
@@ -41,6 +43,8 @@ It provides a flagship developer experience for:
 | SQLite | ✅ | PlanetScale | ✅ |
 | DuckDB | ✅ | CockroachDB | ✅ |
 | Cloudflare D1 | ✅ | YugabyteDB | ✅ |
+| SQL Server | ✅ | MongoDB | ✅ |
+| Redis | ✅ | | |
 
 ---
 
@@ -70,7 +74,7 @@ More screenshots land in [`screenshots/`](screenshots/) as new views ship.
 - **Frontend Engine**: React 19, TypeScript, Vite
 - **Styling**: TailwindCSS, CSS Glassmorphic design tokens
 - **SQL Editor**: Monaco Editor (`@monaco-editor/react`)
-- **Data Grid**: TanStack Table
+- **Data Grid**: Custom virtualized grid (windowed row rendering, inline editing, resizable + auto-fit columns)
 - **Diagramming Canvas**: React Flow (`@xyflow/react`)
 - **State Management**: Zustand
 - **Native Security**: OS Keyring (session tokens, sync key material) + AES-256-GCM (S3 secrets, cloud sync credentials). Database connection passwords in local storage are not yet keyring-backed — that migration is tracked separately.
@@ -93,7 +97,7 @@ The app checks for updates automatically after install.
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) v18+
+- [Node.js](https://nodejs.org/) v20+
 - [Rust & Cargo](https://www.rust-lang.org/) v1.75+
 
 ### Installation & Run
