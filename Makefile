@@ -322,6 +322,9 @@ MACOS_X64_TARGET   := x86_64-apple-darwin
 # must right-click → Open. But at least it's a warning, not "damaged."
 ENTITLEMENTS := src-tauri/entitlements.plist
 
+# Re-packages the DMG with the signed .app so the installer inside the DMG
+# matches the signing (Tauri builds the DMG before this runs, so it still has
+# the unsigned .app otherwise).
 define codesign-app
 	@echo "  Signing $$(basename $(1)) with hardened runtime…"; \
 	app=$$(find $(1)/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit 2>/dev/null); \
@@ -332,9 +335,6 @@ define codesign-app
 			--sign - "$$app" \
 			&& echo "    ✓ signed (adhoc + hardened runtime)" \
 			|| { echo "    ⚠ codesign failed (non-fatal)"; exit 0; }; \
-		\
-		# Re-package DMG with the signed .app so the installer inside the \
-		# DMG matches the signing (Tauri builds DMG before we sign). \
 		dmg_dir="$(1)/release/bundle/dmg"; \
 		dmg=$$(ls "$$dmg_dir"/*.dmg 2>/dev/null | head -1); \
 		if [ -n "$$dmg" ]; then \
