@@ -216,6 +216,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // Track which new row should auto-focus its first cell. Set by the parent
   // via `focusNewRowId` prop when Insert Row is clicked.
   const focusNewRowId = newRows && newRows.length > 0 ? newRows[newRows.length - 1].tempId : null;
+  // Which new rows have already received their one-time auto-focus. Without
+  // this, the ref callback below (an inline function, so React treats it as
+  // "new" every render) re-fires and re-focuses the first column's input on
+  // every keystroke in ANY other column — editing "name" would yank focus
+  // back to "id" after every character.
+  const autoFocusedNewRowIds = useRef<Set<string>>(new Set());
 
   // Click-outside: when a cell is being edited and the user clicks outside
   // the editing cell (but not on a RelationCellInput dropdown or the Flatpickr
@@ -864,9 +870,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     ref={
                       colIdx === 0 && nr.tempId === focusNewRowId
                         ? (el: HTMLTableCellElement | null) => {
-                            if (el) {
+                            if (el && !autoFocusedNewRowIds.current.has(nr.tempId)) {
                               const input = el.querySelector('input, select, textarea');
-                              if (input) setTimeout(() => (input as HTMLElement).focus(), 0);
+                              if (input) {
+                                autoFocusedNewRowIds.current.add(nr.tempId);
+                                setTimeout(() => (input as HTMLElement).focus(), 0);
+                              }
                             }
                           }
                         : undefined
