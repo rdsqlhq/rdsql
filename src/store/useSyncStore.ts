@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { ensureSyncKey } from '../core/sync/credentialCrypto';
 import { pushAllConnections, pullAllChanges, resolveConflictKeepLocal, resolveConflictKeepRemote } from '../core/sync/connectionSync';
+import { pushSettings, pullSettings } from '../core/sync/settingsSync';
 
 interface SyncConflict {
   id: string;
@@ -52,6 +53,11 @@ export const useSyncStore = create<SyncState>((set, get) => ({
     try {
       const { conflicts } = await pushAllConnections();
       await pullAllChanges();
+      // Settings sync is best-effort and doesn't block the (more important)
+      // connection sync above on failure — a settings push/pull error
+      // shouldn't make the user think their connections didn't sync too.
+      await pushSettings().catch(() => undefined);
+      await pullSettings().catch(() => undefined);
       const now = new Date().toISOString();
       localStorage.setItem(LAST_SYNCED_KEY, now);
       set({
