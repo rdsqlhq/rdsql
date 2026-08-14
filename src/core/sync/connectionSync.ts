@@ -57,6 +57,17 @@ export class SyncConflictError extends Error {
  *  of the app needs to know about). Simple localStorage map is enough —
  *  this is bookkeeping, not user data. */
 const VERSION_KEY = 'rdsql_sync_versions_v1';
+const CURSOR_KEY = 'rdsql_sync_cursor_v1';
+
+/** Clears this device's local sync bookkeeping (per-connection version map +
+ *  pull cursor). Neither is scoped by account — call this on sign-out, or a
+ *  different account signing in on the same device inherits the previous
+ *  account's version/cursor state, producing bogus conflicts or silently
+ *  skipping changes it's never actually seen. */
+export function clearLocalSyncState(): void {
+  localStorage.removeItem(VERSION_KEY);
+  localStorage.removeItem(CURSOR_KEY);
+}
 
 function getLocalVersions(): Record<string, number> {
   try {
@@ -142,8 +153,7 @@ export async function pullConnection(connectionId: string): Promise<DatabaseConn
 /** Pulls every change since the last-seen cursor and applies upserts/deletes
  *  directly to `useConnectionStore`. Returns how many resources changed. */
 export async function pullAllChanges(): Promise<number> {
-  const cursorKey = 'rdsql_sync_cursor_v1';
-  let cursor = Number(localStorage.getItem(cursorKey) || '0');
+  let cursor = Number(localStorage.getItem(CURSOR_KEY) || '0');
   let applied = 0;
 
   // Page through the manifest until caught up.
@@ -167,7 +177,7 @@ export async function pullAllChanges(): Promise<number> {
     }
 
     cursor = manifest.cursor;
-    localStorage.setItem(cursorKey, String(cursor));
+    localStorage.setItem(CURSOR_KEY, String(cursor));
     if (!manifest.hasMore) break;
   }
 
