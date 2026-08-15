@@ -11,7 +11,7 @@
 
 **A modern AI-powered database workspace designed for developers.**
 
-[Website](https://rdsql.com) · [Documentation](https://rdsql.com/docs) · [Tutorials](docs/tutorials) · [Releases](https://github.com/rdsqlhq/rdsql/releases) · [Bug Reports](https://github.com/rdsqlhq/rdsql-community/issues/new?template=bug_report.yml) · [Feature Requests](https://github.com/rdsqlhq/rdsql-community/issues/new?template=feature_request.yml) · [Community](https://github.com/rdsqlhq/rdsql-community)
+[Website](https://rdsql.com) · [Documentation](https://rdsql.com/docs) · [Tutorials](docs/tutorials) · [Releases](https://github.com/rdsqlhq/rdsql/releases) · [Bug Reports](https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml) · [Feature Requests](https://github.com/rdsqlhq/rdsql/issues/new?template=feature_request.yml) · [Discussions](https://github.com/rdsqlhq/rdsql/discussions)
 
 </div>
 
@@ -152,14 +152,13 @@ participating is expected to follow the **[Code of Conduct](CODE_OF_CONDUCT.md)*
 
 ## 💬 Community & Support
 
-- 🐛 **[Report a bug](https://github.com/rdsqlhq/rdsql-community/issues/new?template=bug_report.yml)**
-- 💡 **[Request a feature](https://github.com/rdsqlhq/rdsql-community/issues/new?template=feature_request.yml)**
-- 💭 **[Discussions](https://github.com/rdsqlhq/rdsql-community/discussions)**
+- 🐛 **[Report a bug](https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml)**
+- 💡 **[Request a feature](https://github.com/rdsqlhq/rdsql/issues/new?template=feature_request.yml)**
+- 💭 **[Discussions](https://github.com/rdsqlhq/rdsql/discussions)**
 - 🌐 **[rdsql.com](https://rdsql.com)**
 
-All community activity (issues, discussions, product updates) happens in the
-**[rdSQL Community repository](https://github.com/rdsqlhq/rdsql-community)** — this repo is for
-code, releases, and public documentation.
+All community activity (issues, discussions, product updates) happens right here in this
+repository, alongside the code and releases.
 
 ---
 

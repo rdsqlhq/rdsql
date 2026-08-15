@@ -150,13 +150,13 @@ export const AboutModal: React.FC = () => {
           {/* Links */}
           <div className="flex flex-wrap items-center gap-2">
             <a
-              href="https://github.com/rdsqlhq/rdsql-community"
+              href="https://github.com/rdsqlhq/rdsql"
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors"
             >
               <ExternalLink className="w-3 h-3" />
-              Community
+              GitHub
             </a>
             <span className="text-slate-600">·</span>
             <span className="text-xs text-slate-500">com.rdsql.desktop</span>
