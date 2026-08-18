@@ -129,7 +129,7 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
   // ---- Editing state ------------------------------------------------------
   // (Inline cell editing is handled by the DataGrid component; this parent
   //  only tracks pending edits/deletes and the full-screen modal editor.)
-  const [gridSort, setGridSort] = useState<{ colIdx: number; dir: 'asc' | 'desc' } | null>(null);
+  const [gridSort, setGridSort] = useState<{ column: string; dir: 'asc' | 'desc' } | null>(null);
   const [gridFilters, setGridFilters] = useState<FilterCondition[]>([]);
   const [gridFilterOpen, setGridFilterOpen] = useState(false);
   const [modalEditCell, setModalEditCell] = useState<{ row: RowData; col: string; dataType?: string } | null>(null);
@@ -458,7 +458,7 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
           {gridSort && (
             <span className="inline-flex items-center gap-0.5 text-cyan-300 font-mono text-[10px]">
               {gridSort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-              {result.columns[gridSort.colIdx]?.name}
+              {gridSort.column}
               <button
                 onClick={() => setGridSort(null)}
                 className="text-slate-500 hover:text-red-400"
