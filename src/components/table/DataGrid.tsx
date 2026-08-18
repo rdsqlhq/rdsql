@@ -688,9 +688,13 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 </div>
               );
             })}
-            {/* Hide/show columns toggle. */}
+            {/* Hide/show columns toggle — pinned to the right edge of the
+                viewport (not the end of the scrollable content) via
+                `sticky right-0`. With many columns this button used to sit
+                past the last one, so reaching it meant scrolling all the way
+                right first; now it's always reachable without scrolling. */}
             <div
-              className="relative flex items-center justify-center shrink-0 text-center text-slate-500"
+              className="sticky right-0 z-30 flex items-center justify-center shrink-0 text-center text-slate-500 bg-[#0f172a] border-l border-[#1e293b] shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.4)]"
               style={{ width: COLTOGGLE_COL_W }}
             >
               <div ref={colMenuRef} className="relative">
