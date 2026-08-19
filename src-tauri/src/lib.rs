@@ -195,10 +195,15 @@ pub fn run() {
             let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates...")
                 .build(app)?;
 
+            let report_bug = MenuItemBuilder::with_id("report_bug", "Report Bug...")
+                .build(app)?;
+
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&about_item)
                 .separator()
                 .item(&check_updates)
+                .separator()
+                .item(&report_bug)
                 .build()?;
 
             // Build App Menu (macOS app menu)
@@ -285,6 +290,16 @@ pub fn run() {
                 }
                 "about" => {
                     let _ = app.emit("menu_action", "about");
+                }
+                "report_bug" => {
+                    // Opened directly here (not routed through the frontend via
+                    // `menu_action`) — same pattern as `backend_open_login` in
+                    // commands/backend.rs — since this is a pure "open this URL"
+                    // action with no in-app state to touch.
+                    use tauri_plugin_opener::OpenerExt;
+                    let _ = app
+                        .opener()
+                        .open_url("https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml", None::<&str>);
                 }
                 "quit" => {
                     app.exit(0);
