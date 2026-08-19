@@ -145,12 +145,15 @@ export function useColumnResize(
 
   /** Auto-fit a single column to its content width (double-click on handle).
    *  Uses the `measureColumn` callback if provided; otherwise resets to the
-   *  default width. Only the minimum is enforced — content can be as wide as
-   *  it needs to be. */
+   *  default width. Clamped to [MIN, MAX] — unlike manual drag (which lets the
+   *  user set any width they explicitly want), auto-fit is a "guess" from
+   *  content, and an unbounded guess against one very wide cell (a long JSON
+   *  blob, an unbroken URL, ...) blew the column out to that cell's full
+   *  width with no cap, which could make it dominate or overflow the grid. */
   const autoFitColumn = useCallback(
     (name: string) => {
       const measured = measureColumn?.(name);
-      const w = clampMin(measured && measured > 0 ? measured : DEFAULT_COL_WIDTH);
+      const w = clampWidth(measured && measured > 0 ? measured : DEFAULT_COL_WIDTH);
       setWidths((prev) => {
         const next = new Map(prev);
         next.set(name, w);
