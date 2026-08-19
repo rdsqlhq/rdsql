@@ -167,6 +167,29 @@ export const ObjectEditor: React.FC<{ tabId: string }> = ({ tabId }) => {
   const [runResult, setRunResult] = useState<QueryResultData | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [testArgs, setTestArgs] = useState('');
+  // Result panel is bottom-docked + drag-resizable, same position/interaction
+  // as the SQL editor's ResultPanel (see MainLayout.tsx) — kept as a local
+  // implementation rather than reusing that component directly, since it
+  // reads its result from the active tab's `result`/`resultSets` in the tab
+  // store, while Test Run's result is ad-hoc local state (a one-off query,
+  // not routed through the tab's query-execution pipeline).
+  const [testResultHeight, setTestResultHeight] = useState(240);
+  const [isResizingTestResult, setIsResizingTestResult] = useState(false);
+  const resizeAnchorRef = useRef(0);
+  useEffect(() => {
+    if (!isResizingTestResult) return;
+    const onMove = (e: MouseEvent) => {
+      const next = resizeAnchorRef.current - e.clientY;
+      setTestResultHeight(Math.max(120, Math.min(next, window.innerHeight - 200)));
+    };
+    const onUp = () => setIsResizingTestResult(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isResizingTestResult]);
   const [showTestArgsPrompt, setShowTestArgsPrompt] = useState(false);
   const [confirmRunEvent, setConfirmRunEvent] = useState(false);
   const canTestRun = kind === 'view' || kind === 'event' || kind === 'procedure';
@@ -862,57 +885,6 @@ export const ObjectEditor: React.FC<{ tabId: string }> = ({ tabId }) => {
         {error && <CopyableErrorBanner message={error} parseAsDbError tone="red" compact />}
       </div>
 
-      {/* Test Run result — dismissible, shown until the next run or a tab switch. */}
-      {(runResult || runError) && (
-        <div className="shrink-0 border-b border-[#1e293b] bg-[#080c14] px-3 py-2.5 flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-semibold text-blue-300 uppercase tracking-wider flex items-center gap-1.5">
-              <Play className="w-3 h-3" /> Test Run Result
-            </span>
-            <button
-              onClick={() => { setRunResult(null); setRunError(null); }}
-              className="text-slate-500 hover:text-slate-300"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          {runError && <CopyableErrorBanner message={runError} parseAsDbError tone="red" compact />}
-          {runResult && (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10.5px] text-slate-500">
-                {runResult.status_message || `${runResult.affected_rows} row(s) affected`} · {runResult.execution_time_ms}ms
-              </span>
-              {runResult.rows.length > 0 && (
-                <div className="max-h-40 overflow-auto border border-[#1e293b] rounded-lg macos-scroll">
-                  <table className="w-full text-[10.5px] font-mono border-collapse">
-                    <thead className="sticky top-0 bg-[#0f172a]">
-                      <tr>
-                        {runResult.columns.map((c) => (
-                          <th key={c.name} className="text-left px-2 py-1 text-slate-400 font-semibold border-b border-[#1e293b] whitespace-nowrap">
-                            {c.name}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {runResult.rows.map((row, i) => (
-                        <tr key={i} className="odd:bg-white/[0.02]">
-                          {row.map((cell, j) => (
-                            <td key={j} className="px-2 py-1 text-slate-300 whitespace-nowrap border-b border-[#1e293b]/50">
-                              {cell === null ? <span className="text-slate-600 italic">NULL</span> : String(cell)}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Body editor (Monaco) */}
       <div className="flex-1 relative min-h-0">
         {loadingDef ? (
@@ -940,6 +912,72 @@ export const ObjectEditor: React.FC<{ tabId: string }> = ({ tabId }) => {
           />
         )}
       </div>
+
+      {/* Test Run result — bottom-docked + drag-resizable, same position as
+          the SQL editor's ResultPanel. Dismissible, shown until the next run
+          or a tab switch. */}
+      {(runResult || runError) && (
+        <>
+          <div
+            onMouseDown={(e) => {
+              resizeAnchorRef.current = e.clientY + testResultHeight;
+              setIsResizingTestResult(true);
+            }}
+            className="h-1.5 w-full bg-[#1e293b]/40 hover:bg-cyan-500 cursor-row-resize z-30 transition-colors shrink-0"
+            title="Drag to resize result panel"
+          />
+          <div
+            style={{ height: testResultHeight }}
+            className="min-h-[120px] shrink-0 border-t border-[#1e293b] bg-[#080c14] px-3 py-2.5 flex flex-col gap-2 overflow-hidden"
+          >
+            <div className="flex items-center justify-between shrink-0">
+              <span className="text-[10px] font-semibold text-blue-300 uppercase tracking-wider flex items-center gap-1.5">
+                <Play className="w-3 h-3" /> Test Run Result
+              </span>
+              <button
+                onClick={() => { setRunResult(null); setRunError(null); }}
+                className="text-slate-500 hover:text-slate-300"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {runError && <CopyableErrorBanner message={runError} parseAsDbError tone="red" compact />}
+            {runResult && (
+              <div className="flex-1 flex flex-col gap-1.5 min-h-0">
+                <span className="text-[10.5px] text-slate-500 shrink-0">
+                  {runResult.status_message || `${runResult.affected_rows} row(s) affected`} · {runResult.execution_time_ms}ms
+                </span>
+                {runResult.rows.length > 0 && (
+                  <div className="flex-1 overflow-auto border border-[#1e293b] rounded-lg macos-scroll">
+                    <table className="w-full text-[10.5px] font-mono border-collapse">
+                      <thead className="sticky top-0 bg-[#0f172a]">
+                        <tr>
+                          {runResult.columns.map((c) => (
+                            <th key={c.name} className="text-left px-2 py-1 text-slate-400 font-semibold border-b border-[#1e293b] whitespace-nowrap">
+                              {c.name}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {runResult.rows.map((row, i) => (
+                          <tr key={i} className="odd:bg-white/[0.02]">
+                            {row.map((cell, j) => (
+                              <td key={j} className="px-2 py-1 text-slate-300 whitespace-nowrap border-b border-[#1e293b]/50">
+                                {cell === null ? <span className="text-slate-600 italic">NULL</span> : String(cell)}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {confirmRunEvent && (
         <ConfirmDialog
