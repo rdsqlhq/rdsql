@@ -67,12 +67,14 @@ base64 = "0.22"
 # mysql_async/reqwest elsewhere in this crate — no native-tls system dep.
 redis = { version = "1.5", features = ["tokio-comp", "tokio-rustls-comp"] }
 
-# Raw `Bytes` type + the `Sink`/`SinkExt` traits for streaming rows straight
-# into a Postgres `COPY ... FROM STDIN` sink (`commands::pg_migrate`). Both
-# are already pulled in transitively by tokio-postgres; declared directly
-# here because we call their APIs ourselves.
+# Raw `Bytes` type + the `Sink`/`Stream` combinator traits
+# (`SinkExt`/`TryStreamExt`) used by `commands::migrate` to stream rows into
+# a Postgres `COPY ... FROM STDIN` sink and out of a Postgres `query_raw`
+# source cursor. Both are already pulled in transitively by tokio-postgres;
+# declared directly here (default features — no reason to trim them) because
+# we call their APIs ourselves.
 bytes = "1"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = "0.3"
 
 # SSH tunnel / jump-server support (`commands::ssh_tunnel`), used by every
 # networked engine (Postgres, MySQL, SQL Server, Redis). Pure-Rust async SSH

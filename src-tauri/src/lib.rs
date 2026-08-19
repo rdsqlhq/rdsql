@@ -3,7 +3,7 @@ pub mod commands;
 use commands::query::QueryRegistry;
 use commands::s3::TransferRegistry;
 use commands::backend::PendingLogin;
-use commands::pg_migrate::MigrationRegistry;
+use commands::migrate::MigrationRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -185,7 +185,7 @@ pub fn run() {
             let sync_schema = MenuItemBuilder::with_id("sync_schema", "Sync Schema...")
                 .build(app)?;
 
-            let migrate_to_postgres = MenuItemBuilder::with_id("migrate_to_postgres", "Migrate MySQL to PostgreSQL...")
+            let migrate_to_postgres = MenuItemBuilder::with_id("migrate_to_postgres", "Migrate Database...")
                 .build(app)?;
 
             let tools_menu = SubmenuBuilder::new(app, "Tools")
@@ -344,11 +344,11 @@ pub fn run() {
             commands::compare::generate_schema_sync_sql,
             commands::compare::apply_schema_sync,
             commands::updater::check_for_update,
-            // MySQL → PostgreSQL migration wizard (isolated module; all
+            // Cross-engine database migration wizard (isolated module; all
             // commands are additive).
-            commands::pg_migrate::pg_migrate_plan_tables,
-            commands::pg_migrate::pg_migrate_run,
-            commands::pg_migrate::pg_migrate_cancel,
+            commands::migrate::db_migrate_plan_tables,
+            commands::migrate::db_migrate_run,
+            commands::migrate::db_migrate_cancel,
             // S3-compatible storage (isolated module; all commands are additive).
             commands::s3::s3_test_connection,
             commands::s3::s3_list_objects,

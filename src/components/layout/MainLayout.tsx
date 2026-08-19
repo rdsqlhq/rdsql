@@ -19,7 +19,7 @@ import { ObjectEditor } from '../editor/ObjectEditor';
 import { TableDataView } from '../table/TableDataView';
 import { VisualERDCanvas } from '../erd/VisualERDCanvas';
 import { MigrationStudio } from '../migration/MigrationStudio';
-import { MysqlToPostgresWizard } from '../pgmigrate/MysqlToPostgresWizard';
+import { DatabaseMigrationWizard } from '../migrate/DatabaseMigrationWizard';
 import { PluginMarketplace } from '../plugins/PluginMarketplace';
 import { StorageBrowser } from '../storage/StorageBrowser';
 import { RedisBrowser } from '../redis/RedisBrowser';
@@ -464,7 +464,7 @@ export const MainLayout: React.FC = () => {
         ) : activeView === 'migration' ? (
           <MigrationStudio />
         ) : activeView === 'pgMigrate' ? (
-          <MysqlToPostgresWizard />
+          <DatabaseMigrationWizard />
         ) : activeView === 'health' ? (
           <DatabaseHealthView />
         ) : activeView === 'plugins' ? (

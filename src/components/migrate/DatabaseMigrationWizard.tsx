@@ -16,37 +16,47 @@ import { useConnectionStore } from '../../store/useConnectionStore';
 import { useToastStore } from '../../store/useToastStore';
 import { safeInvoke, inTauri } from '../../core/tauri/ipc';
 import { cn } from '../../core/utils/cn';
-import { isMysqlFamily, isPostgresFamily } from '../../core/connection/engines';
+import { isMysqlFamily, isPostgresFamily, isMssqlFamily } from '../../core/connection/engines';
 import type {
   DatabaseConnection,
   SchemaGroupNode,
-  PgTableRef,
-  PgTableMigrationPlan,
-  PgTableRunInput,
-  PgMigrationRunSummary,
-  PgMigrationProgress,
+  DbMigrateTableRef,
+  DbMigrateTablePlan,
+  DbMigrateTableRunInput,
+  DbMigrateRunSummary,
+  DbMigrateProgress,
 } from '../../core/domain/types';
 
 type Step = 'select' | 'preview' | 'run' | 'done';
 
+/** Engines this wizard can read from / write to. Cross-engine only — the
+ *  same-engine case is Compare & Sync's job. */
+const isSupportedSource = (engine: string) => isMysqlFamily(engine) || isPostgresFamily(engine) || isMssqlFamily(engine);
+const isSupportedTarget = (engine: string) => isMysqlFamily(engine) || isPostgresFamily(engine);
+const engineFamilyLabel = (engine: string) => (isMysqlFamily(engine) ? 'mysql' : isPostgresFamily(engine) ? 'postgres' : isMssqlFamily(engine) ? 'mssql' : engine);
+
 /** The confirmation token the backend expects for the target — the
- *  database name, mirroring `expected_pg_confirm_token` in pg_migrate.rs. */
+ *  database name, mirroring `expected_confirm_token` in orchestrator.rs. */
 function expectedTargetToken(c: DatabaseConnection): string {
   return c.scopeDatabase || c.database || c.name;
 }
 
-export const MysqlToPostgresWizard: React.FC = () => {
+export const DatabaseMigrationWizard: React.FC = () => {
   const { connections } = useConnectionStore();
   const pushToast = useToastStore((s) => s.push);
 
-  const mysqlConnections = useMemo(() => connections.filter((c) => isMysqlFamily(c.engine)), [connections]);
-  const pgConnections = useMemo(() => connections.filter((c) => isPostgresFamily(c.engine)), [connections]);
+  const sourceConnections = useMemo(() => connections.filter((c) => isSupportedSource(c.engine)), [connections]);
+  const targetConnections = useMemo(() => connections.filter((c) => isSupportedTarget(c.engine)), [connections]);
 
   const [step, setStep] = useState<Step>('select');
-  const [sourceId, setSourceId] = useState(mysqlConnections[0]?.id ?? '');
-  const [targetId, setTargetId] = useState(pgConnections[0]?.id ?? '');
+  const [sourceId, setSourceId] = useState(sourceConnections[0]?.id ?? '');
+  const [targetId, setTargetId] = useState(targetConnections.find((c) => c.id !== sourceId)?.id ?? '');
   const source = connections.find((c) => c.id === sourceId);
   const target = connections.find((c) => c.id === targetId);
+
+  const sourceFamily = source ? engineFamilyLabel(source.engine) : '';
+  const targetFamily = target ? engineFamilyLabel(target.engine) : '';
+  const sameFamily = !!source && !!target && sourceFamily === targetFamily;
 
   const [sourceDatabases, setSourceDatabases] = useState<string[]>([]);
   const [sourceDbName, setSourceDbName] = useState('');
@@ -56,7 +66,7 @@ export const MysqlToPostgresWizard: React.FC = () => {
   const [loadingTables, setLoadingTables] = useState(false);
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
 
-  const [plans, setPlans] = useState<PgTableMigrationPlan[]>([]);
+  const [plans, setPlans] = useState<DbMigrateTablePlan[]>([]);
   const [editedDdl, setEditedDdl] = useState<Record<string, string>>({});
   const [planning, setPlanning] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
@@ -64,13 +74,14 @@ export const MysqlToPostgresWizard: React.FC = () => {
   const [confirmText, setConfirmText] = useState('');
   const [migrationId, setMigrationId] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
-  const [progressByTable, setProgressByTable] = useState<Record<string, PgMigrationProgress>>({});
-  const [summary, setSummary] = useState<PgMigrationRunSummary | null>(null);
+  const [progressByTable, setProgressByTable] = useState<Record<string, DbMigrateProgress>>({});
+  const [summary, setSummary] = useState<DbMigrateRunSummary | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
 
-  // Load the MySQL source's databases so a specific one can be picked (a
-  // MySQL connection can see many, unlike Postgres's one-database-per-
-  // connection model).
+  // Load the source's database/schema groups (a MySQL connection can see
+  // many databases; a Postgres connection's groups are its schemas; a SQL
+  // Server connection's groups are its databases — `fetch_schema_tree`
+  // already normalizes all three into the same `SchemaGroupNode[]` shape).
   useEffect(() => {
     if (!source) {
       setSourceDatabases([]);
@@ -97,7 +108,7 @@ export const MysqlToPostgresWizard: React.FC = () => {
     };
   }, [sourceId, source]);
 
-  // Load the selected database's tables (with row counts) once picked.
+  // Load the selected database/schema's tables (with row counts) once picked.
   useEffect(() => {
     if (!source || !sourceDbName) {
       setTables([]);
@@ -128,15 +139,15 @@ export const MysqlToPostgresWizard: React.FC = () => {
     };
   }, [source, sourceDbName]);
 
-  const canPlan = !!source && !!target && sourceDbName !== '' && selectedTables.size > 0;
+  const canPlan = !!source && !!target && !sameFamily && sourceDbName !== '' && selectedTables.size > 0;
 
   const runPlan = async () => {
     if (!source || !target) return;
     setPlanning(true);
     setPlanError(null);
     try {
-      const refs: PgTableRef[] = Array.from(selectedTables).map((table) => ({ schema: sourceDbName, table }));
-      const result = await safeInvoke<PgTableMigrationPlan[]>('pg_migrate_plan_tables', {
+      const refs: DbMigrateTableRef[] = Array.from(selectedTables).map((table) => ({ schema: sourceDbName, table }));
+      const result = await safeInvoke<DbMigrateTablePlan[]>('db_migrate_plan_tables', {
         source,
         target,
         tables: refs,
@@ -158,7 +169,7 @@ export const MysqlToPostgresWizard: React.FC = () => {
     if (!migrationId || !inTauri()) return;
     let unlisten: (() => void) | null = null;
     let active = true;
-    listen<PgMigrationProgress>('migration_progress', (e) => {
+    listen<DbMigrateProgress>('migration_progress', (e) => {
       if (e.payload.migrationId !== migrationId) return;
       setProgressByTable((prev) => ({ ...prev, [e.payload.table]: e.payload }));
     }).then((u) => {
@@ -181,12 +192,12 @@ export const MysqlToPostgresWizard: React.FC = () => {
     setRunning(true);
     setStep('run');
     try {
-      const runTables: PgTableRunInput[] = plans.map((p) => ({
+      const runTables: DbMigrateTableRunInput[] = plans.map((p) => ({
         schema: p.schema,
         table: p.table,
         createTableSql: editedDdl[p.table] ?? p.createTableSql,
       }));
-      const result = await safeInvoke<PgMigrationRunSummary>('pg_migrate_run', {
+      const result = await safeInvoke<DbMigrateRunSummary>('db_migrate_run', {
         migrationId: id,
         source,
         target,
@@ -222,7 +233,7 @@ export const MysqlToPostgresWizard: React.FC = () => {
   const cancelRun = async () => {
     if (!migrationId) return;
     try {
-      await safeInvoke('pg_migrate_cancel', { migrationId });
+      await safeInvoke('db_migrate_cancel', { migrationId });
     } catch {
       // best-effort
     }
@@ -235,7 +246,7 @@ export const MysqlToPostgresWizard: React.FC = () => {
       <div className="px-4 py-2 border-b border-[#1e293b] shrink-0 flex items-center gap-2">
         <h2 className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
           <DatabaseZap className="w-4 h-4 text-purple-400" />
-          Migrate MySQL to PostgreSQL
+          Migrate Database
         </h2>
         <span className="text-[10px] text-slate-500 ml-2">
           {step === 'select' && 'Step 1 of 3 — pick source, target, and tables'}
@@ -247,12 +258,15 @@ export const MysqlToPostgresWizard: React.FC = () => {
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {step === 'select' && (
           <SelectStep
-            mysqlConnections={mysqlConnections}
-            pgConnections={pgConnections}
+            sourceConnections={sourceConnections}
+            targetConnections={targetConnections}
             sourceId={sourceId}
             targetId={targetId}
             onSourceChange={setSourceId}
             onTargetChange={setTargetId}
+            sameFamily={sameFamily}
+            sourceFamily={sourceFamily}
+            targetFamily={targetFamily}
             sourceDatabases={sourceDatabases}
             sourceDbName={sourceDbName}
             onSourceDbChange={setSourceDbName}
@@ -313,12 +327,15 @@ export const MysqlToPostgresWizard: React.FC = () => {
 // ===========================================================================
 
 const SelectStep: React.FC<{
-  mysqlConnections: DatabaseConnection[];
-  pgConnections: DatabaseConnection[];
+  sourceConnections: DatabaseConnection[];
+  targetConnections: DatabaseConnection[];
   sourceId: string;
   targetId: string;
   onSourceChange: (id: string) => void;
   onTargetChange: (id: string) => void;
+  sameFamily: boolean;
+  sourceFamily: string;
+  targetFamily: string;
   sourceDatabases: string[];
   sourceDbName: string;
   onSourceDbChange: (db: string) => void;
@@ -333,12 +350,15 @@ const SelectStep: React.FC<{
   planError: string | null;
   onNext: () => void;
 }> = ({
-  mysqlConnections,
-  pgConnections,
+  sourceConnections,
+  targetConnections,
   sourceId,
   targetId,
   onSourceChange,
   onTargetChange,
+  sameFamily,
+  sourceFamily,
+  targetFamily,
   sourceDatabases,
   sourceDbName,
   onSourceDbChange,
@@ -361,15 +381,15 @@ const SelectStep: React.FC<{
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="block text-[11px] text-cyan-400 font-bold uppercase tracking-wider mb-1">
-            Source (MySQL)
+            Source (MySQL / PostgreSQL / SQL Server)
           </label>
-          {mysqlConnections.length === 0 ? (
-            <div className="text-[11px] text-slate-500">No MySQL/MariaDB connections configured.</div>
+          {sourceConnections.length === 0 ? (
+            <div className="text-[11px] text-slate-500">No MySQL, PostgreSQL, or SQL Server connections configured.</div>
           ) : (
             <select value={sourceId} onChange={(e) => onSourceChange(e.target.value)} className={selectCls}>
-              {mysqlConnections.map((c) => (
+              {sourceConnections.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name}
+                  {c.name} ({c.engine})
                 </option>
               ))}
             </select>
@@ -392,13 +412,13 @@ const SelectStep: React.FC<{
 
         <div>
           <label className="block text-[11px] text-amber-400 font-bold uppercase tracking-wider mb-1">
-            Target (PostgreSQL)
+            Target (PostgreSQL / MySQL)
           </label>
-          {pgConnections.length === 0 ? (
-            <div className="text-[11px] text-slate-500">No PostgreSQL connections configured.</div>
+          {targetConnections.length === 0 ? (
+            <div className="text-[11px] text-slate-500">No PostgreSQL or MySQL connections configured.</div>
           ) : (
             <select value={targetId} onChange={(e) => onTargetChange(e.target.value)} className={selectCls}>
-              {pgConnections.map((c) => (
+              {targetConnections.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name} ({c.database || c.name})
                 </option>
@@ -407,6 +427,14 @@ const SelectStep: React.FC<{
           )}
         </div>
       </div>
+
+      {sameFamily && (
+        <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-500/5 border border-amber-500/20 rounded-lg px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          Source and target are both <b>{sourceFamily || targetFamily}</b>. This tool is for moving data between
+          different engines — use Compare &amp; Sync for same-engine synchronization instead.
+        </div>
+      )}
 
       <div className="bg-[#0a0f18] border border-[#1e293b] rounded-xl overflow-hidden">
         <div className="flex items-center justify-between px-3 py-2 border-b border-[#1e293b]">
@@ -475,7 +503,7 @@ const SelectStep: React.FC<{
 // ===========================================================================
 
 const PreviewStep: React.FC<{
-  plans: PgTableMigrationPlan[];
+  plans: DbMigrateTablePlan[];
   editedDdl: Record<string, string>;
   onEditDdl: (table: string, sql: string) => void;
   onBack: () => void;
@@ -526,8 +554,8 @@ const PreviewStep: React.FC<{
                       <thead>
                         <tr className="text-slate-500 text-left">
                           <th className="pb-1 pr-3">Column</th>
-                          <th className="pb-1 pr-3">MySQL type</th>
-                          <th className="pb-1 pr-3">Postgres type</th>
+                          <th className="pb-1 pr-3">Source type</th>
+                          <th className="pb-1 pr-3">Target type</th>
                           <th className="pb-1">Flags</th>
                         </tr>
                       </thead>
@@ -535,8 +563,8 @@ const PreviewStep: React.FC<{
                         {p.columns.map((c) => (
                           <tr key={c.name} className="border-t border-[#1e293b]/40">
                             <td className="py-1 pr-3 font-mono text-slate-200">{c.name}</td>
-                            <td className="py-1 pr-3 font-mono text-slate-500">{c.mysqlType}</td>
-                            <td className="py-1 pr-3 font-mono text-cyan-300">{c.pgType}</td>
+                            <td className="py-1 pr-3 font-mono text-slate-500">{c.nativeType}</td>
+                            <td className="py-1 pr-3 font-mono text-cyan-300">{c.targetType}</td>
                             <td className="py-1 text-slate-500">
                               {c.isPrimaryKey && 'PK '}
                               {c.isAutoIncrement && 'AUTO_INCREMENT '}
@@ -590,13 +618,13 @@ const PreviewStep: React.FC<{
 
 const RunStep: React.FC<{
   target: DatabaseConnection | undefined;
-  plans: PgTableMigrationPlan[];
-  progressByTable: Record<string, PgMigrationProgress>;
+  plans: DbMigrateTablePlan[];
+  progressByTable: Record<string, DbMigrateProgress>;
   confirmText: string;
   onConfirmTextChange: (v: string) => void;
   targetToken: string;
   running: boolean;
-  summary: PgMigrationRunSummary | null;
+  summary: DbMigrateRunSummary | null;
   runError: string | null;
   onBack: () => void;
   onStart: () => void;

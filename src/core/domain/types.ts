@@ -362,43 +362,55 @@ export interface ApplyResult {
 }
 
 // ---------------------------------------------------------------------------
-// MySQL → PostgreSQL migration wizard (Tools menu)
+// Cross-engine database migration wizard (Tools menu)
+//
+// Supported directions: MySQL/PostgreSQL/SQL Server as a source,
+// PostgreSQL/MySQL as a target, source family ≠ target family (same-engine
+// sync is Compare & Sync's job). Backed by `commands::migrate` — a
+// canonical type/value layer shared by every source/target adapter, so
+// these DTOs describe one generic plan/run shape regardless of which two
+// engines are actually involved.
 // ---------------------------------------------------------------------------
 
-export interface PgTableRef {
+export interface DbMigrateTableRef {
   schema?: string;
   table: string;
 }
 
-export interface PgColumnPlanView {
+export interface DbMigrateColumnPlanView {
   name: string;
-  mysqlType: string;
-  pgType: string;
+  nativeType: string;
+  targetType: string;
   nullable: boolean;
   isPrimaryKey: boolean;
   isAutoIncrement: boolean;
 }
 
-export interface PgTableMigrationPlan {
+export interface DbMigrateTablePlan {
   schema?: string;
   table: string;
-  columns: PgColumnPlanView[];
-  /** User-editable DDL preview — columns only. PK/index/sequence creation is
-   *  deferred until after the bulk data load (see the backend's module doc
-   *  for why). */
+  columns: DbMigrateColumnPlanView[];
+  /** User-editable DDL preview — columns only. Always unqualified (no
+   *  schema prefix): the target table is created wherever the target
+   *  connection already points, mirroring `stripSchemaQualifiers`'s
+   *  rationale in `src/core/backup/backupSql.ts`. PK/index/sequence
+   *  creation is deferred until after the bulk data load for Postgres
+   *  targets (see the backend's module doc for why); MySQL targets declare
+   *  them inline since this app doesn't discover secondary indexes to defer
+   *  in the first place. */
   createTableSql: string;
   postLoadSql: string[];
   warnings: string[];
   rowCountEstimate?: number | null;
 }
 
-export interface PgTableRunInput {
+export interface DbMigrateTableRunInput {
   schema?: string;
   table: string;
   createTableSql: string;
 }
 
-export interface PgTableRunResult {
+export interface DbMigrateTableRunResult {
   schema?: string;
   table: string;
   rowsMigrated: number;
@@ -407,14 +419,14 @@ export interface PgTableRunResult {
   durationMs: number;
 }
 
-export interface PgMigrationRunSummary {
-  tables: PgTableRunResult[];
+export interface DbMigrateRunSummary {
+  tables: DbMigrateTableRunResult[];
   totalRows: number;
   durationMs: number;
   cancelled: boolean;
 }
 
-export interface PgMigrationProgress {
+export interface DbMigrateProgress {
   migrationId: string;
   schema?: string;
   table: string;

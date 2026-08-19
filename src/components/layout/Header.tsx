@@ -97,7 +97,7 @@ export const Header: React.FC = () => {
 
           <button
             onClick={() => setActiveView(activeView === 'pgMigrate' ? 'explorer' : 'pgMigrate')}
-            title="Migrate MySQL to PostgreSQL"
+            title="Migrate Database (MySQL/PostgreSQL/SQL Server)"
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
               activeView === 'pgMigrate'
                 ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
