@@ -244,6 +244,7 @@ export interface ObjectEditorContext {
 export type ActiveView =
   | 'explorer'
   | 'migration'
+  | 'pgMigrate'
   | 'transfer'
   | 'ai'
   | 'health'
@@ -358,5 +359,67 @@ export interface ApplyResult {
   failed: number;
   errors: string[];
   durationMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// MySQL → PostgreSQL migration wizard (Tools menu)
+// ---------------------------------------------------------------------------
+
+export interface PgTableRef {
+  schema?: string;
+  table: string;
+}
+
+export interface PgColumnPlanView {
+  name: string;
+  mysqlType: string;
+  pgType: string;
+  nullable: boolean;
+  isPrimaryKey: boolean;
+  isAutoIncrement: boolean;
+}
+
+export interface PgTableMigrationPlan {
+  schema?: string;
+  table: string;
+  columns: PgColumnPlanView[];
+  /** User-editable DDL preview — columns only. PK/index/sequence creation is
+   *  deferred until after the bulk data load (see the backend's module doc
+   *  for why). */
+  createTableSql: string;
+  postLoadSql: string[];
+  warnings: string[];
+  rowCountEstimate?: number | null;
+}
+
+export interface PgTableRunInput {
+  schema?: string;
+  table: string;
+  createTableSql: string;
+}
+
+export interface PgTableRunResult {
+  schema?: string;
+  table: string;
+  rowsMigrated: number;
+  warnings: string[];
+  error?: string | null;
+  durationMs: number;
+}
+
+export interface PgMigrationRunSummary {
+  tables: PgTableRunResult[];
+  totalRows: number;
+  durationMs: number;
+  cancelled: boolean;
+}
+
+export interface PgMigrationProgress {
+  migrationId: string;
+  schema?: string;
+  table: string;
+  rowsDone: number;
+  rowsTotal?: number | null;
+  phase: 'creating' | 'copying' | 'finalizing' | 'done' | 'error';
 }
 

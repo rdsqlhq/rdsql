@@ -36,3 +36,8 @@ pub mod mongo;
 // rdSQL Cloudflare backend: accounts, OAuth device-linking, pairing,
 // entitlement, encrypted connection sync. See commands::backend's module doc.
 pub mod backend;
+// MySQL → PostgreSQL one-time bulk migration wizard (isolated module; all
+// commands are additive). `mysql_pg_types` is the pure type-mapping/value-
+// conversion layer; `pg_migrate` is the I/O/orchestration layer on top of it.
+pub mod mysql_pg_types;
+pub mod pg_migrate;
