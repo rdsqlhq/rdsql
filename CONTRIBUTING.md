@@ -101,10 +101,9 @@ docs: clarify release process
 
 ## Reporting Bugs / Requesting Features
 
-Please use the issue templates in the
-**[rdSQL Community repository](https://github.com/rdsqlhq/rdsql-community/issues/new/choose)**.
-Include reproduction steps, expected vs. actual behavior, and your OS/app
-version for bugs.
+Please use the **[issue templates](https://github.com/rdsqlhq/rdsql/issues/new/choose)**
+right here in this repo. Include reproduction steps, expected vs. actual
+behavior, and your OS/app version for bugs.
 
 ## Releasing
 

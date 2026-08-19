@@ -23,11 +23,6 @@ secret** (see the comment on `RDSQL_CLIENT_KEY` in `backend.rs`) — it only sto
 self-built copy from silently calling production; actual access control is per-user auth via
 `backend_open_login`. There is no bundled backend implementation in this repo.
 
-## Related project
-
-Community hub (issues, discussions, sample databases): `rdsqlhq/rdsql-community`
-(https://github.com/rdsqlhq/rdsql-community).
-
 ## Build / release
 
 Everything's driven from the `Makefile` (`make help`). Releasing is tag-driven via
