@@ -127,6 +127,10 @@ export interface QueryColumn {
   data_type: string;
   is_primary_key?: boolean;
   is_foreign_key?: boolean;
+  /** Postgres `CREATE TYPE ... AS ENUM` columns — the type's allowed labels,
+   *  so the grid can render a dropdown of real values instead of free text.
+   *  Absent/null for every other column and engine. */
+  enum_values?: string[] | null;
 }
 
 export interface QueryResultData {

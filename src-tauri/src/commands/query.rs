@@ -89,6 +89,11 @@ pub struct QueryRequest {
 pub struct QueryColumn {
     pub name: String,
     pub data_type: String,
+    /// Postgres `CREATE TYPE ... AS ENUM` columns get their allowed labels
+    /// here, so the grid can render a dropdown of real values instead of a
+    /// free-text box. `None` for every other column (and for every other
+    /// engine — not populated for MySQL's inline `ENUM(...)` yet).
+    pub enum_values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -174,6 +179,17 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
     if matches!(ty.kind(), Kind::Enum(_)) {
         let v: Option<RawText> = row.try_get(idx).ok().flatten();
         return v.map(|t| json!(t.0)).unwrap_or(serde_json::Value::Null);
+    }
+
+    // Array columns (`int[]`, `text[]`, etc.) get a per-database OID that
+    // can't be matched as a `PgType` constant below — checked via `.kind()`,
+    // same as the enum detection above. Without this, the element type falls
+    // into the catch-all `Option<String>` arm at the bottom, which fails
+    // `accepts()` for the array's OID (not a text OID) and is silently
+    // swallowed to `null` by `.ok()` — so every array column rendered as
+    // NULL in the grid regardless of its actual content.
+    if let Kind::Array(elem_ty) = ty.kind() {
+        return pg_array_to_json(row, idx, elem_ty);
     }
 
     // Each typed getter below uses Option<T>, which returns None for SQL NULL.
@@ -277,6 +293,49 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
     }
 }
 
+/// Convert a PostgreSQL array cell to a JSON array, dispatching on the
+/// array's element type the same way `pg_cell_to_json` dispatches on a
+/// scalar's. Element-level NULLs are preserved (Postgres arrays can mix NULL
+/// and non-NULL entries, e.g. `{1,NULL,3}`); a NULL array itself becomes
+/// `Value::Null`. Kept at the same fidelity as `pg_cell_to_json`'s scalar
+/// arms — numeric/uuid/timestamp/date/time elements fall to the text arm
+/// exactly like their scalar counterparts do above.
+fn pg_array_to_json(row: &tokio_postgres::Row, idx: usize, elem_ty: &PgType) -> serde_json::Value {
+    use serde_json::json;
+
+    fn to_json<T>(v: Option<Vec<Option<T>>>, conv: impl Fn(T) -> serde_json::Value) -> serde_json::Value {
+        match v {
+            Some(items) => {
+                serde_json::Value::Array(items.into_iter().map(|o| o.map(&conv).unwrap_or(serde_json::Value::Null)).collect())
+            }
+            None => serde_json::Value::Null,
+        }
+    }
+
+    match *elem_ty {
+        PgType::INT2 => to_json(row.try_get::<_, Option<Vec<Option<i16>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::INT4 => to_json(row.try_get::<_, Option<Vec<Option<i32>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::INT8 => to_json(row.try_get::<_, Option<Vec<Option<i64>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::FLOAT4 => to_json(row.try_get::<_, Option<Vec<Option<f32>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::FLOAT8 => to_json(row.try_get::<_, Option<Vec<Option<f64>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::BOOL => to_json(row.try_get::<_, Option<Vec<Option<bool>>>>(idx).ok().flatten(), |b| json!(b)),
+        // JSON/JSONB elements — parse each element's text into structured JSON.
+        PgType::JSON | PgType::JSONB => to_json(
+            row.try_get::<_, Option<Vec<Option<String>>>>(idx).ok().flatten(),
+            |s| serde_json::from_str::<serde_json::Value>(&s).unwrap_or_else(|_| json!(s)),
+        ),
+        // Bytea elements — same "describe, don't dump" treatment as the scalar arm.
+        PgType::BYTEA => to_json(
+            row.try_get::<_, Option<Vec<Option<Vec<u8>>>>>(idx).ok().flatten(),
+            |b| json!(format!("<{} bytes>", b.len())),
+        ),
+        // text/varchar/bpchar/name, and everything else genuinely text-shaped
+        // on the wire (numeric, uuid, timestamp, date, time, interval, inet) —
+        // same fallback `pg_cell_to_json`'s default arm uses for these.
+        _ => to_json(row.try_get::<_, Option<Vec<Option<String>>>>(idx).ok().flatten(), |s| json!(s)),
+    }
+}
+
 async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
     let start = Instant::now();
     let sql = request.sql.trim();
@@ -296,6 +355,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
             .map(|c| QueryColumn {
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
+                enum_values: None,
             })
             .collect();
         return Ok(QueryResult {
@@ -335,6 +395,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     .map(|n| QueryColumn {
                         name: n.clone(),
                         data_type: "TEXT".to_string(),
+                        enum_values: None,
                     })
                     .collect();
 
@@ -422,12 +483,13 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                 // even when the query returns zero rows (empty table preview).
                 let stmt = client.prepare(sql).await
                     .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
-                let columns: Vec<QueryColumn> = stmt
+                let mut columns: Vec<QueryColumn> = stmt
                     .columns()
                     .iter()
                     .map(|col| QueryColumn {
                         name: col.name().to_string(),
                         data_type: col.type_().name().to_string(),
+                        enum_values: None,
                     })
                     .collect();
                 // Keep the column Type OIDs so we can dispatch each cell's
@@ -436,6 +498,47 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                 // — which silently nullifies non-character types.
                 let col_types: Vec<PgType> = stmt.columns().iter().map(|c| c.type_().clone()).collect();
                 drop(stmt);
+
+                // `CREATE TYPE ... AS ENUM` columns — fetch each distinct
+                // enum type's allowed labels in one extra round-trip (not
+                // per-column: a result set commonly repeats the same enum
+                // type across rows of a join, so dedupe by type name first)
+                // so the grid can offer a dropdown of real values instead of
+                // a free-text box. Best-effort: a lookup failure (e.g. no
+                // catalog access) just leaves those columns without a value
+                // list, same as before this existed.
+                let mut enum_type_names: Vec<String> = Vec::new();
+                for t in &col_types {
+                    if matches!(t.kind(), Kind::Enum(_)) {
+                        let n = t.name().to_string();
+                        if !enum_type_names.contains(&n) {
+                            enum_type_names.push(n);
+                        }
+                    }
+                }
+                if !enum_type_names.is_empty() {
+                    if let Ok(label_rows) = client
+                        .query(
+                            "SELECT t.typname, e.enumlabel FROM pg_type t \
+                             JOIN pg_enum e ON t.oid = e.enumtypid \
+                             WHERE t.typname = ANY($1) ORDER BY t.typname, e.enumsortorder",
+                            &[&enum_type_names],
+                        )
+                        .await
+                    {
+                        let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+                        for r in &label_rows {
+                            let typname: String = r.get(0);
+                            let label: String = r.get(1);
+                            labels.entry(typname).or_default().push(label);
+                        }
+                        for col in columns.iter_mut() {
+                            if let Some(v) = labels.get(&col.data_type) {
+                                col.enum_values = Some(v.clone());
+                            }
+                        }
+                    }
+                }
 
                 let rows = client.query(sql, &[]).await
                     .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
@@ -517,6 +620,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     .map(|c| QueryColumn {
                         name: c.name_str().to_string(),
                         data_type: mysql_type_name(&c.column_type()),
+                        enum_values: None,
                     })
                     .collect();
 
