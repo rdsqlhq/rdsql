@@ -113,6 +113,32 @@ export const DATA_TYPE_GROUPS: DataTypeGroup[] = [
     ],
   },
   {
+    label: 'Enum / Array',
+    types: [
+      // MySQL/MariaDB ENUM is real inline column syntax — the label is a
+      // literal placeholder the user edits in place (same pattern as
+      // `numeric(10,2)`/`varchar(255)`: TableStructureModal's `splitType`
+      // regex captures everything between the first `(` and its matching
+      // `)` as an editable "length" field, so `enum('a','b')` splits into
+      // base `enum` + editable `'a','b'`, and rejoins correctly on save).
+      { label: "enum('value1','value2')", engines: ['mysql', 'mariadb'] },
+      // Postgres has no bare enum column type at all — `CREATE TYPE x AS
+      // ENUM (...)` must run as a separate statement first, then the type
+      // name becomes the column type. That two-step flow isn't wired up
+      // here, so deliberately not offering a plain "enum" option for
+      // Postgres/SQLite — it would look like a normal type picked from
+      // this list but fail as invalid DDL the moment it's used, which is
+      // worse than the option not existing at all.
+      //
+      // Postgres arrays ARE real, valid bare column syntax though (unlike
+      // enum) — `int[]`/`text[]` need no separate statement, so they're
+      // safe to offer directly.
+      { label: 'integer[]', engines: ['postgres', 'postgresql'] },
+      { label: 'text[]', engines: ['postgres', 'postgresql'] },
+      { label: 'uuid[]', engines: ['postgres', 'postgresql'] },
+    ],
+  },
+  {
     label: 'Network / Geo',
     types: [
       { label: 'inet', engines: ['postgres', 'postgresql'] },
