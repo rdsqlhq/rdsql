@@ -577,7 +577,20 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     COALESCE(pg_total_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)), 0)::bigint AS size_bytes,
                     GREATEST(0, COALESCE(c_est.reltuples::bigint, 0)) AS row_count,
                     col.column_name,
-                    col.data_type,
+                    -- information_schema.columns.data_type is USELESS for
+                    -- enum/array columns — Postgres reports the literal
+                    -- string 'USER-DEFINED' for a `CREATE TYPE ... AS ENUM`
+                    -- column and 'ARRAY' for any array column, never the
+                    -- real type name. The Table Structure modal was showing
+                    -- (and trying to save) that literal placeholder as the
+                    -- column's type. The real name lives in udt_name —
+                    -- Postgres prefixes an array's udt_name with '_' (e.g.
+                    -- '_int4' for int4[]), so strip that and append '[]'.
+                    CASE
+                        WHEN col.data_type = 'ARRAY' THEN substring(col.udt_name from 2) || '[]'
+                        WHEN col.data_type = 'USER-DEFINED' THEN col.udt_name
+                        ELSE col.data_type
+                    END AS data_type,
                     CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk,
                     col.is_nullable,
                     col.column_default,
