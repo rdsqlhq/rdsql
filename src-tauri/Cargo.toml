@@ -20,7 +20,13 @@ serde_json = "1.0"
 tokio = { version = "1.38", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 duckdb = { version = "1.105", features = ["bundled", "chrono"] }
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+# NUMERIC/DECIMAL cell decoding for Postgres query results (commands::query) —
+# Postgres sends NUMERIC in a packed base-10000 binary form, not text, so
+# there's no way to read it as a string without a real decimal type. The
+# postgres FromSql/ToSql impl for Decimal is a rust_decimal feature (not a
+# tokio-postgres/postgres-types one).
+rust_decimal = { version = "1", features = ["db-postgres"] }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 # SQL Server (TDS protocol). rustls to match the mysql_async/reqwest convention
 # elsewhere in this crate — avoids an OpenSSL/native-tls system dependency.

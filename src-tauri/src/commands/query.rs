@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::{FromSql, Kind, Type as PgType};
 use rusqlite::Connection;
 use mysql_async::prelude::*;
 use tokio_util::sync::CancellationToken;
@@ -137,14 +137,45 @@ pub async fn execute_query(
     result
 }
 
+/// Wraps any Postgres wire value, keeping its raw bytes. `postgres-types`'
+/// built-in `FromSql for String` gates on a conservative fixed OID list
+/// (`accepts()` only allows `VARCHAR`/`TEXT`/`BPCHAR`/`NAME`/`UNKNOWN`, plus a
+/// couple of named extension types) — a custom enum column's OID is never in
+/// that list even though its wire value (text or "binary" — enums have no
+/// packed binary form, both formats send the label's raw bytes) is plain
+/// text. This type accepts anything so we can UTF-8-decode it ourselves for
+/// exactly that case. Verified empirically against a live enum column: the
+/// built-in `String` getter returns `WrongType`, this returns the label.
+struct RawText(String);
+impl<'a> FromSql<'a> for RawText {
+    fn from_sql(_ty: &PgType, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(RawText(String::from_utf8(raw.to_vec())?))
+    }
+    fn accepts(_ty: &PgType) -> bool {
+        true
+    }
+}
+
 /// Convert a PostgreSQL cell value to JSON, using the column's type OID to
 /// pick the right Rust representation. This is critical: `try_get::<_, String>`
 /// only works for character types — it silently returns `None` for int/float/
-/// bool/date/uuid/etc., which made `COUNT(*)` return `null` and broke every
-/// numeric/boolean column in SELECT results. By dispatching on `Type`, each
-/// category gets its native FromSql implementation.
+/// bool/date/uuid/timestamp/enum/etc. (each fails `String`'s `accepts()` check
+/// and the error is swallowed by `.ok()`), which made `COUNT(*)` return `null`
+/// and broke every numeric/boolean/date/enum column in SELECT results. By
+/// dispatching on `Type`, each category gets its native FromSql
+/// implementation — needs the `with-chrono-0_4`/`with-uuid-1` tokio-postgres
+/// features (see Cargo.toml) for the date/time/UUID arms below.
 fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_json::Value {
     use serde_json::json;
+
+    // Custom types (`CREATE TYPE ... AS ENUM`) get a per-database OID that
+    // can't be matched as a `PgType` constant below — checked via `.kind()`
+    // before the constant-OID match.
+    if matches!(ty.kind(), Kind::Enum(_)) {
+        let v: Option<RawText> = row.try_get(idx).ok().flatten();
+        return v.map(|t| json!(t.0)).unwrap_or(serde_json::Value::Null);
+    }
+
     // Each typed getter below uses Option<T>, which returns None for SQL NULL.
     match *ty {
         // Integer family — Option wraps SQL NULL.
@@ -174,18 +205,46 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
             let v: Option<bool> = row.try_get(idx).ok().flatten();
             v.map(|b| json!(b)).unwrap_or(serde_json::Value::Null)
         }
-        // Numeric / decimal — convert to string to preserve precision (BigDecimal
-        // isn't in scope without a feature flag, and string round-trips cleanly).
+        // Numeric / decimal — Postgres sends this as a packed base-10000
+        // binary struct, not text, so `Option<String>` always failed here
+        // (confirmed empirically: `WrongType`, silently swallowed to null by
+        // the `.ok()` below it). `rust_decimal`'s `db-postgres` feature
+        // decodes it directly and its `Display` preserves the declared
+        // scale (e.g. `-99.100`, not `-99.1`). `NaN`/`Infinity` (valid
+        // Postgres numeric special values `Decimal` can't represent) fall
+        // through `.ok()` to `null` — a documented edge case, not a crash.
         PgType::NUMERIC => {
-            let v: Option<String> = row.try_get(idx).ok().flatten();
-            v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
+            let v: Option<rust_decimal::Decimal> = row.try_get(idx).ok().flatten();
+            v.map(|d| json!(d.to_string())).unwrap_or(serde_json::Value::Null)
         }
-        // UUID — tokio_postgres needs the `with-uuid-1` feature to deserialize
-        // directly to uuid::Uuid. Without it, the text representation works
-        // fine (UUIDs are sent as text on the wire protocol).
+        // UUID — needs the `with-uuid-1` tokio-postgres feature to decode as
+        // `uuid::Uuid`. `Option<String>` looked plausible (UUIDs render as
+        // text) but doesn't work: `String`'s `FromSql::accepts()` doesn't
+        // include the UUID OID, so it always failed (confirmed empirically).
         PgType::UUID => {
-            let v: Option<String> = row.try_get(idx).ok().flatten();
-            v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
+            let v: Option<uuid::Uuid> = row.try_get(idx).ok().flatten();
+            v.map(|u| json!(u.to_string())).unwrap_or(serde_json::Value::Null)
+        }
+        // Date/time family — same `accepts()` gap as NUMERIC/UUID (confirmed
+        // empirically: all four returned `WrongType` via `Option<String>`,
+        // which is why `created_at`/`scraped_at` rendered blank in the data
+        // grid despite the underlying rows having real values). Needs the
+        // `with-chrono-0_4` tokio-postgres feature.
+        PgType::TIMESTAMP => {
+            let v: Option<chrono::NaiveDateTime> = row.try_get(idx).ok().flatten();
+            v.map(|d| json!(d.format("%Y-%m-%d %H:%M:%S%.f").to_string())).unwrap_or(serde_json::Value::Null)
+        }
+        PgType::TIMESTAMPTZ => {
+            let v: Option<chrono::DateTime<chrono::Utc>> = row.try_get(idx).ok().flatten();
+            v.map(|d| json!(d.to_rfc3339())).unwrap_or(serde_json::Value::Null)
+        }
+        PgType::DATE => {
+            let v: Option<chrono::NaiveDate> = row.try_get(idx).ok().flatten();
+            v.map(|d| json!(d.to_string())).unwrap_or(serde_json::Value::Null)
+        }
+        PgType::TIME => {
+            let v: Option<chrono::NaiveTime> = row.try_get(idx).ok().flatten();
+            v.map(|t| json!(t.to_string())).unwrap_or(serde_json::Value::Null)
         }
         // JSON / JSONB — tokio_postgres can deserialize these to serde_json::Value
         // only with the `with-serde_json-1` feature. Without it, we get the raw
@@ -205,8 +264,12 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
             v.map(|b| json!(format!("<{} bytes>", b.len())))
                 .unwrap_or(serde_json::Value::Null)
         }
-        // Everything else (text, varchar, bpchar, name, timestamp, date, time,
-        // interval, inet, etc.) converts cleanly to String.
+        // Everything else genuinely text-shaped (text, varchar, bpchar, name)
+        // converts cleanly to String. Types with their own binary wire
+        // format that also need `Option<String>` here (interval, inet, and
+        // anything else not covered above) will hit the same accepts()
+        // failure as the ones fixed above — add an explicit arm using the
+        // right FromSql target if one of those turns out to matter too.
         _ => {
             let v: Option<String> = row.try_get(idx).ok().flatten();
             v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
