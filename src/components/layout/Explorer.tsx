@@ -4729,6 +4729,82 @@ export const Explorer: React.FC = () => {
             {folderContextMenu.tag ? folderContextMenu.tag.label : 'Other'}
           </div>
 
+          <button
+            onClick={() => {
+              useConnectionStore.getState().openNewConnectionForTag(folderContextMenu.tag?.id ?? null);
+              setFolderContextMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>New Connection…</span>
+          </button>
+
+          {/* Show ▸ — same tree display toggles as the global Explorer
+              context menu, surfaced here too so they're reachable without
+              right-clicking empty tree space. */}
+          <ContextSubMenu label="Show" icon={<Eye className="w-3.5 h-3.5" />} tone="text-slate-300" panelWidth={200}>
+            {(close) => (
+              <>
+                <button
+                  onClick={() => {
+                    setShowSystemSchemas(!showSystemSchemas);
+                    setTimeout(() => {
+                      expandedConnIds.forEach((id) => {
+                        const c = connections.find((cc) => cc.id === id);
+                        if (c) loadSchemaForConnection(c);
+                      });
+                    }, 0);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showSystemSchemas ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <Database className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>System Schemas</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShowRowCounts(!showRowCounts);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showRowCounts ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <Hash className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Row Counts</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShowTableSizes(!showTableSizes);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showTableSizes ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <HardDrive className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Table Sizes</span>
+                </button>
+              </>
+            )}
+          </ContextSubMenu>
+
+          <div className="h-px bg-[#1e293b] my-1" />
+
           {folderContextMenu.tag && (
             <>
               <button

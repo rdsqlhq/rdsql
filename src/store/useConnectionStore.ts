@@ -15,6 +15,12 @@ interface ConnectionState {
   loadingSchema: boolean;
   isConnectionModalOpen: boolean;
   editingConnection: DatabaseConnection | null;
+  /** Tag to pre-select when the modal is opened for a brand-new connection
+   *  (e.g. via a tag's "New Connection…" context menu item). `null` means no
+   *  pre-selection — the form defaults to untagged. Consumed once the modal
+   *  opens; `setConnectionModalOpen`/`openEditConnection` both reset it so it
+   *  never leaks into an unrelated "New Connection" click. */
+  newConnectionTagId: string | null;
   searchQuery: string;
   /** Per-connection currently selected database/schema. Set when the user
    *  clicks a database node in the explorer; the executor applies it as the
@@ -56,6 +62,9 @@ interface ConnectionState {
   setSchemaTreeForConn: (connId: string, tree: SchemaGroupNode[]) => void;
   setConnectionModalOpen: (open: boolean) => void;
   openEditConnection: (conn: DatabaseConnection) => void;
+  /** Open the modal for a brand-new connection, pre-selecting `tagId`. Used
+   *  by the Explorer's per-tag "New Connection…" context menu item. */
+  openNewConnectionForTag: (tagId: string | null) => void;
   setSearchQuery: (query: string) => void;
 }
 
@@ -69,6 +78,7 @@ export const useConnectionStore = create<ConnectionState>()(
       loadingSchema: false,
       isConnectionModalOpen: false,
       editingConnection: null,
+      newConnectionTagId: null,
       searchQuery: '',
       activeDatabaseByConn: {},
       pinnedSchemasByConn: {},
@@ -231,8 +241,12 @@ export const useConnectionStore = create<ConnectionState>()(
         }));
       },
 
-      setConnectionModalOpen: (open) => set({ isConnectionModalOpen: open, editingConnection: null }),
-      openEditConnection: (conn) => set({ editingConnection: conn, isConnectionModalOpen: true }),
+      setConnectionModalOpen: (open) =>
+        set({ isConnectionModalOpen: open, editingConnection: null, newConnectionTagId: null }),
+      openEditConnection: (conn) =>
+        set({ editingConnection: conn, isConnectionModalOpen: true, newConnectionTagId: null }),
+      openNewConnectionForTag: (tagId) =>
+        set({ isConnectionModalOpen: true, editingConnection: null, newConnectionTagId: tagId }),
       setSearchQuery: (query) => set({ searchQuery: query }),
     }),
     {

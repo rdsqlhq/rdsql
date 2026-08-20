@@ -127,14 +127,18 @@ export function parseConnectionUrl(url: string): ParsedConnection {
 
 /** True when `text` looks like a single connection URL rather than an env
  *  blob. We treat it as a URL when the first non-blank, non-comment line
- *  matches `<scheme>://` and has no `=` on it. */
+ *  matches `<scheme>://` and has no `=` before its query string — a query
+ *  string (`?schema=public`, `?sslmode=require`, …) legitimately contains
+ *  `=`, so only the part before the `?` disqualifies it as a `KEY=VALUE`
+ *  env line. */
 function looksLikeUrl(text: string): boolean {
   const firstLine = text
     .split(/\r?\n/)
     .map((l) => l.trim())
     .find((l) => l && !l.startsWith('#'));
   if (!firstLine) return false;
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(firstLine) && !firstLine.includes('=');
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(firstLine)) return false;
+  return !firstLine.split('?')[0].includes('=');
 }
 
 /** Parse a pasted `.env` blob or a bare connection URL into connection fields.
