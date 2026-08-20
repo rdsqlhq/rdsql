@@ -5,6 +5,8 @@
  * that would be rejected by the target database.
  */
 
+import { engineFamily } from '../connection/engines';
+
 export interface DataTypeOption {
   label: string;
   /** Engines where this type is valid. Empty = all engines. */
@@ -122,17 +124,30 @@ export const DATA_TYPE_GROUPS: DataTypeGroup[] = [
   },
 ];
 
+/** Does a type's `engines` allow-list cover the given connection engine?
+ *  Matched by wire-protocol FAMILY, not literal engine id — a type entry
+ *  written as `engines: ['postgres', 'postgresql']` must also show up for
+ *  `cockroachdb`/`yugabytedb` (Postgres-wire-compatible), and one written as
+ *  `engines: ['mysql', 'mariadb']` must show up for `tidb`/`planetscale`
+ *  (MySQL-wire-compatible) — those engine ids were never in the literal
+ *  lists, so a straight string match silently hid engine-appropriate types
+ *  (e.g. `jsonb`/`serial`/`uuid` for CockroachDB, `tinyint`/blob variants for
+ *  TiDB) for every engine outside the big two. */
+function typeAllowsEngine(t: DataTypeOption, engine: string): boolean {
+  if (!t.engines || t.engines.length === 0) return true;
+  const fam = engineFamily(engine);
+  return t.engines.some((e) => engineFamily(e) === fam);
+}
+
 /**
  * Returns the flat list of type labels filtered to the given engine, for
  * components that want a simple array (e.g. backward-compat with the old
  * TYPE_OPTIONS constant).
  */
 export function getTypeOptions(engine?: string): string[] {
-  const eng = (engine || '').toLowerCase();
+  const eng = engine || '';
   return DATA_TYPE_GROUPS.flatMap((g) =>
-    g.types
-      .filter((t) => !t.engines || t.engines.length === 0 || t.engines.includes(eng))
-      .map((t) => t.label)
+    g.types.filter((t) => typeAllowsEngine(t, eng)).map((t) => t.label)
   );
 }
 
@@ -141,9 +156,9 @@ export function getTypeOptions(engine?: string): string[] {
  * components that render optgroups.
  */
 export function getGroupedTypeOptions(engine?: string): DataTypeGroup[] {
-  const eng = (engine || '').toLowerCase();
+  const eng = engine || '';
   return DATA_TYPE_GROUPS.map((g) => ({
     label: g.label,
-    types: g.types.filter((t) => !t.engines || t.engines.length === 0 || t.engines.includes(eng)),
+    types: g.types.filter((t) => typeAllowsEngine(t, eng)),
   })).filter((g) => g.types.length > 0);
 }
