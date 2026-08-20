@@ -115,13 +115,14 @@ export const DATA_TYPE_GROUPS: DataTypeGroup[] = [
   {
     label: 'Enum / Array',
     types: [
-      // MySQL/MariaDB ENUM is real inline column syntax — the label is a
-      // literal placeholder the user edits in place (same pattern as
-      // `numeric(10,2)`/`varchar(255)`: TableStructureModal's `splitType`
-      // regex captures everything between the first `(` and its matching
-      // `)` as an editable "length" field, so `enum('a','b')` splits into
-      // base `enum` + editable `'a','b'`, and rejoins correctly on save).
-      { label: "enum('value1','value2')", engines: ['mysql', 'mariadb'] },
+      // MySQL/MariaDB ENUM is real inline column syntax. Kept bare (no
+      // placeholder values baked into the label) — picking "enum" from the
+      // dropdown just sets the base type, and CreateTableModal/
+      // TableStructureModal both detect that (see `isEnumType`) and swap in
+      // a dedicated `EnumValuesInput` for typing the actual allowed values,
+      // instead of expecting the user to hand-write `('a','b')` SQL syntax
+      // into a generic "length" field.
+      { label: 'enum', engines: ['mysql', 'mariadb'] },
       // Postgres has no bare enum column type at all — `CREATE TYPE x AS
       // ENUM (...)` must run as a separate statement first, then the type
       // name becomes the column type. That two-step flow isn't wired up
@@ -187,4 +188,50 @@ export function getGroupedTypeOptions(engine?: string): DataTypeGroup[] {
     label: g.label,
     types: g.types.filter((t) => typeAllowsEngine(t, eng)),
   })).filter((g) => g.types.length > 0);
+}
+
+// ─── Enum value helpers ─────────────────────────────────────────────────────
+//
+// A MySQL/MariaDB `enum('a','b')` column's allowed values are the one part
+// of a type string that's inherently user data, not a fixed vocabulary like
+// every other type's parameters — so unlike `varchar(255)`'s length or
+// `numeric(10,2)`'s precision/scale, we don't want the user hand-writing SQL
+// string-literal syntax (quoting, doubled-quote escaping) into a plain text
+// field. These helpers back a dedicated `EnumValuesInput` control (see
+// `components/table/EnumValuesInput.tsx`) that lets them type a plain
+// comma-separated list instead.
+
+/** Does this type string look like an inline enum column (`enum`, or
+ *  `enum('a','b')`)? Matches the bare keyword too, since that's what a user
+ *  gets immediately after picking "enum" from the type dropdown, before
+ *  they've typed any values yet. */
+export function isEnumType(type: string): boolean {
+  return /^enum\b/i.test(type.trim());
+}
+
+/** Parse the quoted-list content between an enum type's parens (e.g.
+ *  `'a','b'`) into plain, unescaped values. Matches only well-formed
+ *  single-quoted segments — this is a read-back of what `buildEnumInner`
+ *  itself produces (or what MySQL's own introspection reports), not a
+ *  general SQL parser. */
+export function parseEnumInner(inner: string): string[] {
+  const values: string[] = [];
+  const re = /'((?:[^']|'')*)'/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(inner))) {
+    values.push(m[1].replace(/''/g, "'"));
+  }
+  return values;
+}
+
+/** Build the quoted-list content for an enum type's parens from plain
+ *  values — trims and drops empties (so an in-progress "a, " doesn't emit a
+ *  dangling empty member), and doubles any embedded single quote the way
+ *  SQL string literals require. */
+export function buildEnumInner(values: string[]): string {
+  return values
+    .map((v) => v.trim())
+    .filter((v) => v !== '')
+    .map((v) => `'${v.replace(/'/g, "''")}'`)
+    .join(',');
 }

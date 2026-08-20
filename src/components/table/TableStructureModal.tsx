@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import {
   X,
@@ -21,12 +21,16 @@ import {
   Loader2,
   Link2,
   Sparkles,
+  List,
 } from 'lucide-react';
-import { SchemaTableNode, SchemaColumnNode, DatabaseConnection } from '../../core/domain/types';
+import { SchemaTableNode, SchemaColumnNode, DatabaseConnection, QueryResultData } from '../../core/domain/types';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { quoteIdent, qualifiedTable } from '../../core/sql/ident';
-import { getGroupedTypeOptions, getTypeOptions } from '../../core/sql/dataTypes';
+import { isPostgresFamily } from '../../core/connection/engines';
+import { getGroupedTypeOptions, getTypeOptions, isEnumType, parseEnumInner, buildEnumInner } from '../../core/sql/dataTypes';
+import { EnumValuesInput } from './EnumValuesInput';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 import {
   fetchTableIndexes,
   fetchTableForeignKeys,
@@ -108,7 +112,7 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
   onClose,
 }) => {
   useEscapeToClose(isOpen ? onClose : null);
-  const [activeTab, setActiveTab] = useState<'columns' | 'indexes' | 'foreignKeys' | 'ddl'>('columns');
+  const [activeTab, setActiveTab] = useState<'columns' | 'indexes' | 'foreignKeys' | 'enumTypes' | 'ddl'>('columns');
   const [copied, setCopied] = useState(false);
 
   // Add-column form
@@ -129,10 +133,43 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
   const [loadingMeta, setLoadingMeta] = useState(false);
   const [metaError, setMetaError] = useState<string | null>(null);
 
+  // Postgres enum types (`CREATE TYPE ... AS ENUM`) — a schema-level object,
+  // not a column property, so they're managed here as their own tab rather
+  // than folded into the Columns tab. Not offered for other engines: MySQL's
+  // ENUM is inline column syntax (handled directly via EnumValuesInput in
+  // the Columns tab instead), and SQLite/MSSQL have no enum concept at all.
+  interface EnumTypeInfo { name: string; values: string[]; }
+  const [enumTypes, setEnumTypes] = useState<EnumTypeInfo[]>([]);
+  const [loadingEnums, setLoadingEnums] = useState(false);
+  const [enumsError, setEnumsError] = useState<string | null>(null);
+  const [isAddingEnum, setIsAddingEnum] = useState(false);
+  const [newEnum, setNewEnum] = useState<{ name: string; valuesInner: string }>({ name: '', valuesInner: '' });
+  const [editingEnumName, setEditingEnumName] = useState<string | null>(null);
+  const [editEnum, setEditEnum] = useState<{ name: string; valuesInner: string } | null>(null);
+  // Which enum type's quick-edit popup is open, shown inline from the
+  // Columns tab (next to a column whose type is that enum) instead of
+  // requiring a trip to the Enum Types tab. Shares editingEnumName/editEnum
+  // with that tab's own inline edit — same state, just a different place to
+  // render it, so Save/recreate behave identically either way.
+  const [enumPopoverFor, setEnumPopoverFor] = useState<string | null>(null);
+  const enumPopoverRef = useRef<HTMLDivElement | null>(null);
+  // Populated when a values edit needs the recreate flow (Postgres can only
+  // ADD a value in place — removing or reordering means: rename the old
+  // type out of the way, create a new one with the target values, migrate
+  // every column using it, then drop the old type). Holds the blast-radius
+  // (which columns) so the confirm dialog can show it before running.
+  const [enumImpact, setEnumImpact] = useState<{
+    original: EnumTypeInfo;
+    newName: string;
+    newValues: string[];
+    columns: { schema: string; table: string; column: string; defaultExpr: string | null }[];
+  } | null>(null);
+
   if (!isOpen) return null;
 
   const engine = conn.engine;
   const tbl = qualifiedTable(engine, tableName, schemaName);
+  const isPg = isPostgresFamily(engine);
 
   // ── Live introspection ──────────────────────────────────────────────────
   const refreshMeta = useCallback(async () => {
@@ -158,6 +195,62 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
   useEffect(() => {
     void refreshMeta();
   }, [refreshMeta]);
+
+  // ── Enum types (Postgres only) ────────────────────────────────────────────
+  const refreshEnumTypes = useCallback(async () => {
+    if (!isPg) return;
+    setLoadingEnums(true);
+    setEnumsError(null);
+    try {
+      const sch = (schemaName || 'public').replace(/'/g, "''");
+      const res = await safeInvoke<QueryResultData>('execute_query', {
+        request: {
+          config: conn,
+          sql: `SELECT t.typname, e.enumlabel FROM pg_type t
+                JOIN pg_enum e ON t.oid = e.enumtypid
+                JOIN pg_namespace n ON n.oid = t.typnamespace
+                WHERE n.nspname = '${sch}'
+                ORDER BY t.typname, e.enumsortorder;`,
+        },
+        queryId: `enum_types_${Date.now()}`,
+        __meta: { source: 'ddl' },
+      });
+      const byName = new Map<string, string[]>();
+      for (const row of res.rows) {
+        const name = String(row[0]);
+        const label = String(row[1]);
+        if (!byName.has(name)) byName.set(name, []);
+        byName.get(name)!.push(label);
+      }
+      setEnumTypes(Array.from(byName.entries()).map(([name, values]) => ({ name, values })));
+    } catch (err: any) {
+      setEnumsError(err?.message || String(err));
+      setEnumTypes([]);
+    } finally {
+      setLoadingEnums(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn, isPg, schemaName]);
+
+  useEffect(() => {
+    void refreshEnumTypes();
+  }, [refreshEnumTypes]);
+
+  // Close the Columns-tab quick-edit popup on an outside click, matching
+  // every other dropdown/popover in this app (e.g. DataGrid's column-
+  // visibility menu).
+  useEffect(() => {
+    if (!enumPopoverFor) return;
+    const onDown = (e: MouseEvent) => {
+      if (enumPopoverRef.current && !enumPopoverRef.current.contains(e.target as Node)) {
+        setEnumPopoverFor(null);
+        setEditingEnumName(null);
+        setEditEnum(null);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [enumPopoverFor]);
 
   // ── DDL runner ──────────────────────────────────────────────────────────
   const runDdl = async (sql: string, label: string) => {
@@ -445,6 +538,145 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     runDdl(sql, `Foreign key "${fk.constraintName}" dropped`);
   };
 
+  // ── Enum types: add / edit / drop ────────────────────────────────────────
+  const qualifiedType = (name: string) => qualifiedTable(engine, name, schemaName);
+
+  const runEnumDdl = async (sql: string, label: string) => {
+    setRunning(true);
+    setError(null);
+    setInfo(null);
+    try {
+      await safeInvoke('execute_query', {
+        request: { config: conn, sql },
+        queryId: `enum_ddl_${Date.now()}`,
+        __meta: { source: 'ddl' },
+      });
+      setInfo(`${label} applied.`);
+      setIsAddingEnum(false);
+      setNewEnum({ name: '', valuesInner: '' });
+      setEditingEnumName(null);
+      setEditEnum(null);
+      setEnumImpact(null);
+      setEnumPopoverFor(null);
+      void refreshEnumTypes();
+      onSchemaChanged();
+    } catch (err: any) {
+      setError(err?.message || String(err));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const handleAddEnum = () => {
+    const name = newEnum.name.trim();
+    if (!name) { setError('Type name is required.'); return; }
+    if (parseEnumInner(newEnum.valuesInner).length === 0) { setError('Add at least one value.'); return; }
+    runEnumDdl(`CREATE TYPE ${qualifiedType(name)} AS ENUM (${newEnum.valuesInner});`, `Enum type "${name}" created`);
+  };
+
+  const startEditEnum = (t: EnumTypeInfo) => {
+    setEditingEnumName(t.name);
+    setEditEnum({ name: t.name, valuesInner: buildEnumInner(t.values) });
+    setError(null);
+    setInfo(null);
+  };
+
+  const handleSaveEditEnum = async (original: EnumTypeInfo) => {
+    if (!editEnum) return;
+    const newName = editEnum.name.trim();
+    if (!newName) { setError('Type name is required.'); return; }
+    const newValues = parseEnumInner(editEnum.valuesInner);
+    if (newValues.length === 0) { setError('Add at least one value.'); return; }
+
+    const nameChanged = newName !== original.name;
+    const valuesChanged = JSON.stringify(newValues) !== JSON.stringify(original.values);
+
+    if (!nameChanged && !valuesChanged) {
+      setEditingEnumName(null);
+      setEnumPopoverFor(null);
+      setInfo('No changes to save.');
+      return;
+    }
+
+    if (!valuesChanged) {
+      // Pure rename — cheap and safe, no recreation needed.
+      runEnumDdl(`ALTER TYPE ${qualifiedType(original.name)} RENAME TO ${quoteIdent(engine, newName)};`, `Enum type "${original.name}" renamed`);
+      return;
+    }
+
+    // Values changed (added/removed/reordered) — Postgres's ALTER TYPE can
+    // only ADD a value in place, never remove or reorder one, so this needs
+    // a full recreate. Find every column using the type first, so the
+    // confirm dialog can show the actual blast radius before anything runs.
+    setRunning(true);
+    setError(null);
+    try {
+      const typeName = original.name.replace(/'/g, "''");
+      const res = await safeInvoke<QueryResultData>('execute_query', {
+        request: {
+          config: conn,
+          sql: `SELECT table_schema, table_name, column_name, column_default FROM information_schema.columns WHERE udt_name = '${typeName}';`,
+        },
+        queryId: `enum_deps_${Date.now()}`,
+        __meta: { source: 'ddl' },
+      });
+      const columns = res.rows.map((r) => ({
+        schema: String(r[0]),
+        table: String(r[1]),
+        column: String(r[2]),
+        // e.g. "'active'::mood" — Postgres deparses a column default this
+        // way. Ties the default's cast to the type being dropped below, so
+        // it must be dropped before the type change and re-added against
+        // the new type afterward, or DROP TYPE fails on the leftover
+        // dependency (and a plain ALTER COLUMN TYPE would otherwise try to
+        // convert it itself and can fail there instead).
+        defaultExpr: r[3] === null || r[3] === undefined ? null : String(r[3]),
+      }));
+      setEnumImpact({ original, newName, newValues, columns });
+    } catch (err: any) {
+      setError(err?.message || String(err));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const confirmEnumRecreate = () => {
+    if (!enumImpact) return;
+    const { original, newName, newValues, columns } = enumImpact;
+    const tmpName = `${original.name}_old_${Date.now()}`;
+    const newQualified = qualifiedType(newName);
+    const statements: string[] = [
+      `ALTER TYPE ${qualifiedType(original.name)} RENAME TO ${quoteIdent(engine, tmpName)};`,
+      `CREATE TYPE ${newQualified} AS ENUM (${buildEnumInner(newValues)});`,
+    ];
+    for (const c of columns) {
+      const colTbl = qualifiedTable(engine, c.table, c.schema);
+      const colIdent = quoteIdent(engine, c.column);
+      // A default tied to the old type must come off first — otherwise it's
+      // still a dependency on the old type after the column's own type has
+      // moved on, and DROP TYPE below fails.
+      if (c.defaultExpr) statements.push(`ALTER TABLE ${colTbl} ALTER COLUMN ${colIdent} DROP DEFAULT;`);
+      statements.push(`ALTER TABLE ${colTbl} ALTER COLUMN ${colIdent} TYPE ${newQualified} USING ${colIdent}::text::${newQualified};`);
+      if (c.defaultExpr) {
+        // Re-cast just the literal part of the old default ("'active'::mood"
+        // -> "'active'") onto the new type. Falls back to re-applying the
+        // default expression completely as-is if it isn't the usual
+        // quoted-literal-then-cast shape Postgres normally deparses enum
+        // defaults as — best-effort, surfaced as a normal DB error if wrong.
+        const literalMatch = /^('(?:[^']|'')*')/.exec(c.defaultExpr);
+        const newDefault = literalMatch ? `${literalMatch[1]}::${newQualified}` : c.defaultExpr;
+        statements.push(`ALTER TABLE ${colTbl} ALTER COLUMN ${colIdent} SET DEFAULT ${newDefault};`);
+      }
+    }
+    statements.push(`DROP TYPE ${qualifiedType(tmpName)};`);
+    runEnumDdl(statements.join('\n'), `Enum type "${original.name}" updated`);
+  };
+
+  const handleRemoveEnum = (t: EnumTypeInfo) => {
+    if (!window.confirm(`Drop enum type "${t.name}"? This fails if any column still uses it.`)) return;
+    runEnumDdl(`DROP TYPE ${qualifiedType(t.name)};`, `Enum type "${t.name}" dropped`);
+  };
+
   // ── DDL preview ─────────────────────────────────────────────────────────
   const generateDDL = () => {
     let ddl = `-- Structure definition for ${tbl}\n\n`;
@@ -528,6 +760,7 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
   const fkCount = foreignKeys.length;
 
   return (
+    <>
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 select-none font-sans">
       <div className="bg-[#0a0f18] border border-[#1e293b] rounded-2xl shadow-2xl w-full max-w-4xl min-h-[560px] max-h-[85vh] overflow-hidden flex flex-col">
         {/* Header */}
@@ -559,12 +792,13 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
         {/* Tabs */}
         <div className="flex items-center border-b border-[#1e293b] bg-[#080c14] text-xs font-medium px-3">
           <div className="flex gap-1">
-            {([
-              ['columns', 'Columns', columns.length, Columns],
-              ['indexes', 'Indexes', indexCount, Layers],
-              ['foreignKeys', 'Foreign Keys', fkCount, GitBranch],
-              ['ddl', 'DDL', null, FileCode],
-            ] as const).map(([key, label, count, Icon]) => (
+            {[
+              ['columns', 'Columns', columns.length, Columns] as const,
+              ['indexes', 'Indexes', indexCount, Layers] as const,
+              ['foreignKeys', 'Foreign Keys', fkCount, GitBranch] as const,
+              ...(isPg ? [['enumTypes', 'Enum Types', enumTypes.length, List] as const] : []),
+              ['ddl', 'DDL', null, FileCode] as const,
+            ].map(([key, label, count, Icon]) => (
               <button
                 key={key}
                 onClick={() => setActiveTab(key)}
@@ -671,19 +905,78 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
                                 )}
                               </select>
                             ) : (
-                              <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold lowercase ${typePillClass(col.data_type)}`}>
-                                {splitType(col.data_type).type || '—'}
-                              </span>
+                              <div className="relative flex items-center gap-1">
+                                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold lowercase ${typePillClass(col.data_type)}`}>
+                                  {splitType(col.data_type).type || '—'}
+                                </span>
+                                {(() => {
+                                  const colEnum = isPg ? enumTypes.find((et) => et.name.toLowerCase() === (col.data_type || '').toLowerCase()) : undefined;
+                                  if (!colEnum) return null;
+                                  return (
+                                    <>
+                                      <button
+                                        onClick={() => { startEditEnum(colEnum); setEnumPopoverFor(colEnum.name); }}
+                                        title={`Edit enum type "${colEnum.name}"`}
+                                        className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-purple-400"
+                                      >
+                                        <List className="w-3 h-3" />
+                                      </button>
+                                      {enumPopoverFor === colEnum.name && editEnum && (
+                                        <div ref={enumPopoverRef} className="absolute z-40 top-full left-0 mt-1 w-64 bg-[#0a0f18] border border-[#1e293b] rounded-lg shadow-2xl p-2.5 space-y-2 normal-case">
+                                          <div className="flex items-center justify-between">
+                                            <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider flex items-center gap-1">
+                                              <List className="w-3 h-3" /> Edit Enum Type
+                                            </span>
+                                            <button onClick={() => { setEnumPopoverFor(null); setEditingEnumName(null); setEditEnum(null); setError(null); }} className="text-slate-500 hover:text-slate-300">
+                                              <X className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                          <div>
+                                            <label className="block text-[9px] text-slate-400 mb-1">Type Name</label>
+                                            <input type="text" value={editEnum.name} onChange={(e) => setEditEnum({ ...editEnum, name: e.target.value })} className={INPUT_CLS_SM} />
+                                          </div>
+                                          <div>
+                                            <label className="block text-[9px] text-slate-400 mb-1">Values</label>
+                                            <EnumValuesInput value={editEnum.valuesInner} onChange={(inner) => setEditEnum({ ...editEnum, valuesInner: inner })} className={INPUT_CLS_SM} />
+                                          </div>
+                                          <div className="text-[9px] text-amber-400/80 normal-case">
+                                            Removing or reordering values migrates every column using this type — you'll see which ones before anything runs.
+                                          </div>
+                                          <div className="flex justify-end gap-1.5">
+                                            <button onClick={() => { setEnumPopoverFor(null); setEditingEnumName(null); setEditEnum(null); setError(null); }}
+                                              className="px-2 py-1 rounded text-[10px] font-semibold bg-[#141e33] hover:bg-[#1e293b] text-slate-400">
+                                              Cancel
+                                            </button>
+                                            <button onClick={() => handleSaveEditEnum(colEnum)} disabled={running}
+                                              className="px-2 py-1 rounded text-[10px] font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1">
+                                              {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                                              Save
+                                            </button>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </>
+                                  );
+                                })()}
+                              </div>
                             )}
                           </td>
                           <td className="py-1.5 px-2.5 border-r border-[#1e293b] align-top">
                             {isEditing ? (
-                              <input
-                                value={d.length}
-                                onChange={(e) => setEditDraft({ ...d, length: e.target.value })}
-                                placeholder="—"
-                                className={INPUT_CLS}
-                              />
+                              isEnumType(d.type) ? (
+                                <EnumValuesInput
+                                  value={d.length}
+                                  onChange={(inner) => setEditDraft({ ...d, length: inner })}
+                                  className={INPUT_CLS}
+                                />
+                              ) : (
+                                <input
+                                  value={d.length}
+                                  onChange={(e) => setEditDraft({ ...d, length: e.target.value })}
+                                  placeholder="—"
+                                  className={INPUT_CLS}
+                                />
+                              )
                             ) : (
                               <span className="text-slate-400 text-[11px] font-mono">{splitType(col.data_type).length || '—'}</span>
                             )}
@@ -768,9 +1061,19 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
                       </select>
                     </div>
                     <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">Length</label>
-                      <input type="text" placeholder="255" value={newCol.length} onChange={(e) => setNewCol({ ...newCol, length: e.target.value })}
-                        className={INPUT_CLS} />
+                      <label className="block text-[10px] text-slate-400 mb-1">
+                        {isEnumType(newCol.type) ? 'Values' : 'Length'}
+                      </label>
+                      {isEnumType(newCol.type) ? (
+                        <EnumValuesInput
+                          value={newCol.length}
+                          onChange={(inner) => setNewCol({ ...newCol, length: inner })}
+                          className={INPUT_CLS}
+                        />
+                      ) : (
+                        <input type="text" placeholder="255" value={newCol.length} onChange={(e) => setNewCol({ ...newCol, length: e.target.value })}
+                          className={INPUT_CLS} />
+                      )}
                     </div>
                     <label className="flex items-center gap-1 text-[10px] text-slate-300 h-8">
                       <input type="checkbox" checked={newCol.nullable} onChange={(e) => setNewCol({ ...newCol, nullable: e.target.checked })} />
@@ -1129,6 +1432,123 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
             </div>
           )}
 
+          {/* ── Enum Types (Postgres only) ──────────────────────────────── */}
+          {activeTab === 'enumTypes' && (
+            <div className="space-y-2">
+              {loadingEnums && (
+                <div className="flex items-center gap-2 text-[11px] text-slate-500 py-2">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Loading enum types…
+                </div>
+              )}
+              {enumsError && !loadingEnums && (
+                <div className="text-[11px] text-slate-500 italic py-2">Could not load enum types: {enumsError}</div>
+              )}
+              {!loadingEnums && !enumsError && enumTypes.length === 0 && !isAddingEnum && (
+                <div className="p-6 text-center text-slate-500 italic">
+                  No enum types in {schemaName || 'public'}. Enum types are database objects — created once, then used as a column type across any table.
+                </div>
+              )}
+              {enumTypes.map((t) => {
+                const isEditingThis = editingEnumName === t.name;
+                const form = isEditingThis ? editEnum! : null;
+                return (
+                  <div key={t.name} className="p-2.5 bg-[#0a0f18] border border-[#1e293b] rounded-lg hover:border-slate-700 transition-colors">
+                    {isEditingThis && form ? (
+                      <div className="space-y-2">
+                        <div className="font-bold text-blue-400 flex items-center justify-between">
+                          <span className="flex items-center gap-1.5"><Pencil className="w-3.5 h-3.5" /> Edit Enum Type</span>
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => handleSaveEditEnum(t)} disabled={running} className="p-1 rounded hover:bg-emerald-500/20 text-emerald-400 disabled:opacity-40" title="Save">
+                              {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                            </button>
+                            <button onClick={() => { setEditingEnumName(null); setEditEnum(null); setError(null); }} className="p-1 rounded hover:bg-[#1e293b] text-slate-400" title="Cancel">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] text-slate-400 mb-1">Type Name</label>
+                            <input type="text" value={form.name} onChange={(e) => setEditEnum({ ...form, name: e.target.value })} className={INPUT_CLS} />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-slate-400 mb-1">Values</label>
+                            <EnumValuesInput
+                              value={form.valuesInner}
+                              onChange={(inner) => setEditEnum({ ...form, valuesInner: inner })}
+                              className={INPUT_CLS}
+                            />
+                          </div>
+                        </div>
+                        <div className="text-[10px] text-amber-400/80">
+                          Removing or reordering values recreates the type and migrates every column using it — you'll see exactly which ones before anything runs.
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <List className="w-4 h-4 text-purple-400 shrink-0" />
+                        <div className="font-bold text-slate-100 flex-1 truncate text-[12px]">{t.name}</div>
+                        <div className="flex flex-wrap items-center gap-1 max-w-[50%] justify-end">
+                          {t.values.map((v) => (
+                            <span key={v} className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 font-mono text-[10px]">{v}</span>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button onClick={() => startEditEnum(t)} disabled={running} title="Edit enum type"
+                            className="p-1 rounded hover:bg-[#1e293b] text-slate-500 hover:text-blue-400 disabled:opacity-40">
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button onClick={() => handleRemoveEnum(t)} disabled={running} title="Drop enum type"
+                            className="p-1 rounded hover:bg-[#1e293b] text-slate-500 hover:text-red-400 disabled:opacity-40">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {isAddingEnum ? (
+                <div className="p-3 bg-[#0f172a] border border-blue-500/30 rounded-xl space-y-2">
+                  <div className="font-bold text-blue-400 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5" /> Add Enum Type</span>
+                    <button onClick={() => { setIsAddingEnum(false); setError(null); }} className="text-slate-500 hover:text-slate-300"><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-1">Type Name</label>
+                      <input type="text" placeholder="e.g. mood" value={newEnum.name} onChange={(e) => setNewEnum({ ...newEnum, name: e.target.value })}
+                        autoCapitalize="off" autoCorrect="off" spellCheck={false} className={INPUT_CLS} />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-slate-400 mb-1">Values</label>
+                      <EnumValuesInput
+                        value={newEnum.valuesInner}
+                        onChange={(inner) => setNewEnum({ ...newEnum, valuesInner: inner })}
+                        autoFocus
+                        className={INPUT_CLS}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <button onClick={handleAddEnum} disabled={running || !newEnum.name.trim() || parseEnumInner(newEnum.valuesInner).length === 0}
+                      className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold rounded-lg flex items-center gap-1.5 transition-colors">
+                      {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                      Add Enum Type
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button onClick={() => { setIsAddingEnum(true); setError(null); setInfo(null); setNewEnum({ name: '', valuesInner: '' }); }}
+                  className="w-full py-1.5 border border-dashed border-[#1e293b] hover:border-blue-500/50 hover:bg-[#0f172a] rounded-xl text-slate-400 hover:text-blue-400 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors">
+                  <Plus className="w-3.5 h-3.5" />
+                  Add Enum Type
+                </button>
+              )}
+            </div>
+          )}
+
           {/* ── DDL ──────────────────────────────────────────────────────── */}
           {activeTab === 'ddl' && (
             <div className="space-y-3">
@@ -1155,6 +1575,46 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
         </div>
       </div>
     </div>
+
+    {enumImpact && (
+      <ConfirmDialog
+        title={`Recreate enum type "${enumImpact.original.name}"?`}
+        message={
+          <>
+            Postgres can't remove or reorder enum values in place — this renames the current type
+            aside, creates a new one with the updated values, migrates every column below to it,
+            then drops the old type.
+            {enumImpact.columns.length > 0 && (
+              <> If any of those columns hold a value you removed, the migration will fail — Postgres
+              validates every existing row against the new value list.</>
+            )}
+          </>
+        }
+        confirmLabel={running ? 'Applying…' : 'Recreate & Migrate'}
+        tone="warning"
+        loading={running}
+        onConfirm={confirmEnumRecreate}
+        onClose={() => setEnumImpact(null)}
+      >
+        {enumImpact.columns.length > 0 ? (
+          <div className="space-y-1">
+            <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+              {enumImpact.columns.length} column{enumImpact.columns.length === 1 ? '' : 's'} using this type
+            </div>
+            <div className="max-h-32 overflow-y-auto space-y-0.5">
+              {enumImpact.columns.map((c, i) => (
+                <div key={i} className="font-mono text-[11px] text-slate-300">
+                  {c.schema}.{c.table}.{c.column}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="text-[11px] text-slate-500 italic">No columns currently use this type.</div>
+        )}
+      </ConfirmDialog>
+    )}
+    </>
   );
 };
 
