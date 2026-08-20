@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_postgres::NoTls;
-use tokio_postgres::types::Type as PgType;
+use tokio_postgres::types::{Kind, Type as PgType};
 use rusqlite::Connection;
 use mysql_async::prelude::*;
 use tokio_util::sync::CancellationToken;
@@ -145,6 +145,18 @@ pub async fn execute_query(
 /// category gets its native FromSql implementation.
 fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_json::Value {
     use serde_json::json;
+
+    // Array columns (`int[]`, `text[]`, etc.) get a per-database OID that
+    // can't be matched as a `PgType` constant below — checked via `.kind()`
+    // first, same as the enum-detection pattern would be. Without this, the
+    // element type falls into the catch-all `Option<String>` arm at the
+    // bottom, which fails `accepts()` for the array's OID (not a text OID)
+    // and is silently swallowed to `null` by `.ok()` — so every array column
+    // rendered as NULL in the grid regardless of its actual content.
+    if let Kind::Array(elem_ty) = ty.kind() {
+        return pg_array_to_json(row, idx, elem_ty);
+    }
+
     // Each typed getter below uses Option<T>, which returns None for SQL NULL.
     match *ty {
         // Integer family — Option wraps SQL NULL.
@@ -211,6 +223,49 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
             let v: Option<String> = row.try_get(idx).ok().flatten();
             v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
         }
+    }
+}
+
+/// Convert a PostgreSQL array cell to a JSON array, dispatching on the
+/// array's element type the same way `pg_cell_to_json` dispatches on a
+/// scalar's. Element-level NULLs are preserved (Postgres arrays can mix NULL
+/// and non-NULL entries, e.g. `{1,NULL,3}`); a NULL array itself becomes
+/// `Value::Null`. Kept at the same fidelity as `pg_cell_to_json`'s scalar
+/// arms — numeric/uuid/timestamp/date/time elements fall to the text arm
+/// exactly like their scalar counterparts do above.
+fn pg_array_to_json(row: &tokio_postgres::Row, idx: usize, elem_ty: &PgType) -> serde_json::Value {
+    use serde_json::json;
+
+    fn to_json<T>(v: Option<Vec<Option<T>>>, conv: impl Fn(T) -> serde_json::Value) -> serde_json::Value {
+        match v {
+            Some(items) => {
+                serde_json::Value::Array(items.into_iter().map(|o| o.map(&conv).unwrap_or(serde_json::Value::Null)).collect())
+            }
+            None => serde_json::Value::Null,
+        }
+    }
+
+    match *elem_ty {
+        PgType::INT2 => to_json(row.try_get::<_, Option<Vec<Option<i16>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::INT4 => to_json(row.try_get::<_, Option<Vec<Option<i32>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::INT8 => to_json(row.try_get::<_, Option<Vec<Option<i64>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::FLOAT4 => to_json(row.try_get::<_, Option<Vec<Option<f32>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::FLOAT8 => to_json(row.try_get::<_, Option<Vec<Option<f64>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::BOOL => to_json(row.try_get::<_, Option<Vec<Option<bool>>>>(idx).ok().flatten(), |b| json!(b)),
+        // JSON/JSONB elements — parse each element's text into structured JSON.
+        PgType::JSON | PgType::JSONB => to_json(
+            row.try_get::<_, Option<Vec<Option<String>>>>(idx).ok().flatten(),
+            |s| serde_json::from_str::<serde_json::Value>(&s).unwrap_or_else(|_| json!(s)),
+        ),
+        // Bytea elements — same "describe, don't dump" treatment as the scalar arm.
+        PgType::BYTEA => to_json(
+            row.try_get::<_, Option<Vec<Option<Vec<u8>>>>>(idx).ok().flatten(),
+            |b| json!(format!("<{} bytes>", b.len())),
+        ),
+        // text/varchar/bpchar/name, and everything else genuinely text-shaped
+        // on the wire (numeric, uuid, timestamp, date, time, interval, inet) —
+        // same fallback `pg_cell_to_json`'s default arm uses for these.
+        _ => to_json(row.try_get::<_, Option<Vec<Option<String>>>>(idx).ok().flatten(), |s| json!(s)),
     }
 }
 

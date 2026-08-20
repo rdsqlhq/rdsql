@@ -174,7 +174,11 @@ const CellContent: React.FC<{
     return (
       <>
         <Braces className="w-3 h-3 text-amber-400 shrink-0" />
-        <span className="truncate">{String(value)}</span>
+        {/* JSON/JSONB/array columns arrive from the backend as parsed JS
+            objects/arrays, not strings — String(obj) would render
+            "[object Object]". cellToText JSON.stringifies objects and passes
+            primitives through untouched. */}
+        <span className="truncate">{cellToText(value)}</span>
       </>
     );
   }
