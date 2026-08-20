@@ -89,6 +89,11 @@ pub struct QueryRequest {
 pub struct QueryColumn {
     pub name: String,
     pub data_type: String,
+    /// Postgres `CREATE TYPE ... AS ENUM` columns get their allowed labels
+    /// here, so the grid can render a dropdown of real values instead of a
+    /// free-text box. `None` for every other column (and for every other
+    /// engine — not populated for MySQL's inline `ENUM(...)` yet).
+    pub enum_values: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -288,6 +293,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
             .map(|c| QueryColumn {
                 name: c.name.clone(),
                 data_type: c.data_type.clone(),
+                enum_values: None,
             })
             .collect();
         return Ok(QueryResult {
@@ -327,6 +333,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     .map(|n| QueryColumn {
                         name: n.clone(),
                         data_type: "TEXT".to_string(),
+                        enum_values: None,
                     })
                     .collect();
 
@@ -414,12 +421,13 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                 // even when the query returns zero rows (empty table preview).
                 let stmt = client.prepare(sql).await
                     .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
-                let columns: Vec<QueryColumn> = stmt
+                let mut columns: Vec<QueryColumn> = stmt
                     .columns()
                     .iter()
                     .map(|col| QueryColumn {
                         name: col.name().to_string(),
                         data_type: col.type_().name().to_string(),
+                        enum_values: None,
                     })
                     .collect();
                 // Keep the column Type OIDs so we can dispatch each cell's
@@ -428,6 +436,47 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                 // — which silently nullifies non-character types.
                 let col_types: Vec<PgType> = stmt.columns().iter().map(|c| c.type_().clone()).collect();
                 drop(stmt);
+
+                // `CREATE TYPE ... AS ENUM` columns — fetch each distinct
+                // enum type's allowed labels in one extra round-trip (not
+                // per-column: a result set commonly repeats the same enum
+                // type across rows of a join, so dedupe by type name first)
+                // so the grid can offer a dropdown of real values instead of
+                // a free-text box. Best-effort: a lookup failure (e.g. no
+                // catalog access) just leaves those columns without a value
+                // list, same as before this existed.
+                let mut enum_type_names: Vec<String> = Vec::new();
+                for t in &col_types {
+                    if matches!(t.kind(), Kind::Enum(_)) {
+                        let n = t.name().to_string();
+                        if !enum_type_names.contains(&n) {
+                            enum_type_names.push(n);
+                        }
+                    }
+                }
+                if !enum_type_names.is_empty() {
+                    if let Ok(label_rows) = client
+                        .query(
+                            "SELECT t.typname, e.enumlabel FROM pg_type t \
+                             JOIN pg_enum e ON t.oid = e.enumtypid \
+                             WHERE t.typname = ANY($1) ORDER BY t.typname, e.enumsortorder",
+                            &[&enum_type_names],
+                        )
+                        .await
+                    {
+                        let mut labels: HashMap<String, Vec<String>> = HashMap::new();
+                        for r in &label_rows {
+                            let typname: String = r.get(0);
+                            let label: String = r.get(1);
+                            labels.entry(typname).or_default().push(label);
+                        }
+                        for col in columns.iter_mut() {
+                            if let Some(v) = labels.get(&col.data_type) {
+                                col.enum_values = Some(v.clone());
+                            }
+                        }
+                    }
+                }
 
                 let rows = client.query(sql, &[]).await
                     .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
@@ -509,6 +558,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     .map(|c| QueryColumn {
                         name: c.name_str().to_string(),
                         data_type: mysql_type_name(&c.column_type()),
+                        enum_values: None,
                     })
                     .collect();
 

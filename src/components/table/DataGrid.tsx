@@ -54,6 +54,9 @@ export interface DataGridColumn {
   is_foreign_key?: boolean;
   /** Part of a secondary index → renders an index icon in the header. */
   is_indexed?: boolean;
+  /** Postgres enum column's allowed labels — renders a dropdown of real
+   *  values (inline + the full-screen modal) instead of a free-text box. */
+  enum_values?: string[] | null;
 }
 
 export interface DataGridProps {
@@ -185,6 +188,13 @@ const CellContent: React.FC<{
   return <span className="truncate">{String(value)}</span>;
 });
 CellContent.displayName = 'CellContent';
+
+/** A column has real enum labels (currently only Postgres `CREATE TYPE ...
+ *  AS ENUM` columns populate this) → editor kind is 'enum' regardless of the
+ *  raw `data_type` string, so it gets a dropdown of real values instead of
+ *  whatever `getEditorKind` would infer from the type name alone. */
+const resolveEditorKind = (col: Pick<DataGridColumn, 'data_type' | 'enum_values'>): ReturnType<typeof getEditorKind> =>
+  col.enum_values && col.enum_values.length > 0 ? 'enum' : getEditorKind(col.data_type);
 
 // ─── DataGrid ───────────────────────────────────────────────────────────────
 
@@ -351,12 +361,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   // Column metadata for the filter drawer (name + editor kind + raw type).
   const filterColumns: FilterColumn[] = useMemo(
-    () => columns.map((c) => ({ name: c.name, kind: getEditorKind(c.data_type), data_type: c.data_type })),
+    () => columns.map((c) => ({ name: c.name, kind: resolveEditorKind(c), data_type: c.data_type })),
     [columns],
   );
   const columnKinds = useMemo(() => {
     const m = new Map<string, ReturnType<typeof getEditorKind>>();
-    columns.forEach((c) => m.set(c.name, getEditorKind(c.data_type)));
+    columns.forEach((c) => m.set(c.name, resolveEditorKind(c)));
     return m;
   }, [columns]);
   const columnIndex = useMemo(() => {
@@ -817,7 +827,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
                   const isEditing = editingCell?.rowIdx === rowIdx && editingCell?.colIdx === colIdx;
                   const hasPendingEdit = rowEdits && colName && Object.prototype.hasOwnProperty.call(rowEdits, colName);
                   const displayValue = hasPendingEdit ? rowEdits![colName] : cell;
-                  const editorKind = getEditorKind(col?.data_type);
+                  const editorKind = resolveEditorKind(col);
                   const relation = fkMap?.get(colName);
                   const w = colWidth(colName);
 
@@ -877,6 +887,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
                             onChange={setDraft}
                             onCommit={commitEdit}
                             onDiscard={discardEdit}
+                            enumValues={col?.enum_values}
                             autoFocus
                           />
                         )
@@ -995,7 +1006,8 @@ export const DataGrid: React.FC<DataGridProps> = ({
                         />
                       ) : (
                         <TypedCellInput
-                          kind={getEditorKind(col.data_type)}
+                          kind={resolveEditorKind(col)}
+                          enumValues={col.enum_values}
                           value={rawVal ?? ''}
                           onChange={(v) => onNewRowEdit?.(nr.tempId, col.name, v === '' ? null : v)}
                           placeholder={col.name}
@@ -1085,13 +1097,15 @@ const InlineCellEditor: React.FC<{
   onCommit: () => void;
   onDiscard: () => void;
   autoFocus?: boolean;
-}> = ({ kind, value, onChange, onCommit, onDiscard, autoFocus }) => {
+  enumValues?: string[] | null;
+}> = ({ kind, value, onChange, onCommit, onDiscard, autoFocus, enumValues }) => {
   return (
     <div className="flex items-center w-full px-0.5" style={{ height: 24 }}>
       <TypedCellInput
         kind={kind}
         value={value}
         onChange={onChange}
+        enumValues={enumValues}
         // Wrapped, not passed directly: `TypedCellInput`'s `onBlur` forwards
         // the native focus event through to whatever handler it's given
         // (despite being typed as `() => void`), so `onBlur={onCommit}`

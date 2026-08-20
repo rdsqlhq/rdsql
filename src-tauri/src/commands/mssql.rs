@@ -459,6 +459,7 @@ pub async fn run_mssql_query(config: &ConnectionConfig, sql: &str) -> Result<Que
             .map(|c| QueryColumn {
                 name: c.name().to_string(),
                 data_type: mssql_type_name(c.column_type()),
+                enum_values: None,
             })
             .collect();
 

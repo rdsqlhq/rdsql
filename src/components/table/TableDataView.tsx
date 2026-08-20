@@ -564,6 +564,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
         is_primary_key: pkColumns.includes(c.name),
         is_foreign_key: fkColumns.has(c.name) || fkMap.has(c.name),
         is_indexed: indexedColumns.has(c.name),
+        enum_values: c.enum_values,
       })),
     [result?.columns, requiredColumns, pkColumns, fkColumns, fkMap, indexedColumns]
   );
@@ -1591,6 +1592,9 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
           columnName={modalEditCell.col}
           dataType={modalEditCell.dataType}
           isJson={isJsonType(modalEditCell.dataType)}
+          enumValues={gridColumns.find((c) => c.name === modalEditCell.col)?.enum_values}
+          relation={fkMap.get(modalEditCell.col)}
+          relationConnection={queryConfig ?? activeConn ?? undefined}
           value={
             (() => {
               const edits = pendingUpdates.get(modalEditCell.row);
@@ -1611,6 +1615,9 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
           columnName={newRowModal.col}
           dataType={newRowModal.dataType}
           isJson={isJsonType(newRowModal.dataType)}
+          enumValues={gridColumns.find((c) => c.name === newRowModal.col)?.enum_values}
+          relation={fkMap.get(newRowModal.col)}
+          relationConnection={queryConfig ?? activeConn ?? undefined}
           value={
             (() => {
               const nr = newRows.find((r) => r.tempId === newRowModal.tempId);
