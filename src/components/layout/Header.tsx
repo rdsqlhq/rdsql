@@ -10,6 +10,7 @@ import {
   Shield,
   Activity,
   ArrowLeftRight,
+  DatabaseZap,
   ZoomIn,
   ZoomOut,
   UserCircle,
@@ -92,6 +93,19 @@ export const Header: React.FC = () => {
           >
             <ArrowLeftRight className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden lg:inline">Compare</span>
+          </button>
+
+          <button
+            onClick={() => setActiveView(activeView === 'pgMigrate' ? 'explorer' : 'pgMigrate')}
+            title="Migrate Database (MySQL/PostgreSQL/SQL Server)"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+              activeView === 'pgMigrate'
+                ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-[#141e33]'
+            }`}
+          >
+            <DatabaseZap className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden lg:inline">Migrate</span>
           </button>
 
           <button

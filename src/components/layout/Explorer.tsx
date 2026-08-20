@@ -18,6 +18,7 @@ import {
   Calendar,
   ToggleLeft,
   Info,
+  HardDrive,
   HardDriveDownload,
   HardDriveUpload,
   Download,
@@ -340,7 +341,7 @@ const TreeFolder: React.FC<{
       {count != null && <span className="text-[10px] text-slate-600 font-mono shrink-0">{count}</span>}
     </button>
     {expanded && (
-      <div className="ml-3 pl-2 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">{children}</div>
+      <div className="ml-2 pl-1.5 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">{children}</div>
     )}
   </div>
 );
@@ -478,6 +479,10 @@ export const Explorer: React.FC = () => {
   const connStatus = useHealthStore((s) => s.connStatus);
   const showSystemSchemas = useSettingsStore((s) => s.showSystemSchemas);
   const setShowSystemSchemas = useSettingsStore((s) => s.setShowSystemSchemas);
+  const showRowCounts = useSettingsStore((s) => s.showRowCounts);
+  const setShowRowCounts = useSettingsStore((s) => s.setShowRowCounts);
+  const showTableSizes = useSettingsStore((s) => s.showTableSizes);
+  const setShowTableSizes = useSettingsStore((s) => s.setShowTableSizes);
   const cloudConfigured = useAuthStore((s) => s.cloudConfigured);
   const authStatus = useAuthStore((s) => s.status);
   const syncStatus = useSyncStore((s) => s.status);
@@ -1855,7 +1860,7 @@ export const Explorer: React.FC = () => {
                       this is a dedicated, static tree instead of falling
                       into the SchemaGroupNode-shaped block below. */}
                   {isConnExpanded && isRedisConn && (
-                    <div className="ml-4 pl-2 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
+                    <div className="ml-2 pl-1.5 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
                       {redisKeyspaceLoading.has(conn.id) && !redisKeyspace[conn.id] ? (
                         <div className="flex items-center gap-2 text-[11px] text-slate-500 py-1 font-mono">
                           <RefreshCw className="w-3 h-3 animate-spin text-blue-400" />
@@ -1884,7 +1889,7 @@ export const Explorer: React.FC = () => {
                             <span>Databases</span>
                           </button>
                           {redisDbBranchExpanded.has(conn.id) && (
-                          <div className="ml-3 pl-2 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
+                          <div className="ml-2 pl-1.5 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
                             {Array.from({ length: 16 }, (_, i) => i).map((dbIndex) => {
                               const info = (redisKeyspace[conn.id] || []).find((d) => d.dbIndex === dbIndex);
                               const keyCount = info?.keys ?? 0;
@@ -1918,7 +1923,7 @@ export const Explorer: React.FC = () => {
                   {/* Schema Tree (every other engine) */}
                   {isConnExpanded && !isRedisConn && (
                     <>
-                    <div className="ml-4 pl-2 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
+                    <div className="ml-2 pl-1.5 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
                       {isConnOffline ? (
                         <div className="flex items-center gap-1.5 text-[11px] text-red-400/80 py-1 pl-1">
                           <WifiOff className="w-3 h-3 shrink-0" />
@@ -2017,10 +2022,10 @@ export const Explorer: React.FC = () => {
                                 )}
                                 {/* Database total size + table count, pushed right. */}
                                 <div className="ml-auto flex items-center gap-1 shrink-0">
-                                  {dbSizeLabel && (
+                                  {showTableSizes && dbSizeLabel && (
                                     <span
                                       className={`text-[9.5px] font-mono px-1 py-0.5 rounded ${getSizeColorClass(dbSizeBytes)}`}
-                                      title={`${dbSizeLabel} across ${group.children.length} table${group.children.length === 1 ? '' : 's'}${dbRowCount > 0 ? ` · ${dbRowCount.toLocaleString()} rows` : ''}`}
+                                      title={`${dbSizeLabel} across ${group.children.length} table${group.children.length === 1 ? '' : 's'}${showRowCounts && dbRowCount > 0 ? ` · ${dbRowCount.toLocaleString()} rows` : ''}`}
                                     >
                                       {dbSizeLabel}
                                     </span>
@@ -2032,7 +2037,7 @@ export const Explorer: React.FC = () => {
                               </button>
 
                               {isGroupExpanded && (
-                                <div className="ml-4 pl-2 border-l border-white/5 flex flex-col gap-0 mt-0.5">
+                                <div className="ml-2 pl-1.5 border-l border-white/5 flex flex-col gap-0 mt-0.5">
                                   {(() => {
                                     // Categorize the group's tables/views into their own
                                     // expandable folders (DataGrip/DBeaver style), instead
@@ -2061,16 +2066,17 @@ export const Explorer: React.FC = () => {
                                             )}
                                             <span className="truncate flex-1 text-left font-medium">{table.name}</span>
 
-                                            {/* Size & Row Badges */}
+                                            {/* Size & Row Badges — each independently toggleable via
+                                                Explorer's Show ▸ submenu (Row Counts / Table Sizes). */}
                                             <div className="flex items-center gap-1 shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
-                                              {typeof table.row_count === 'number' && (
+                                              {showRowCounts && typeof table.row_count === 'number' && (
                                                 <span className="text-[9.5px] font-mono px-1 py-0.5 rounded bg-slate-800/80 text-slate-500 flex items-center gap-0.5" title={`${table.row_count.toLocaleString()} rows`}>
                                                   <Hash className="w-2.5 h-2.5" />
                                                   {table.row_count.toLocaleString()}
                                                 </span>
                                               )}
 
-                                              {typeof table.size_bytes === 'number' && table.size_bytes > 0 && (
+                                              {showTableSizes && typeof table.size_bytes === 'number' && table.size_bytes > 0 && (
                                                 <span className={`text-[9.5px] font-mono px-1 py-0.5 rounded ${getSizeColorClass(table.size_bytes)}`} title={formatBytes(table.size_bytes)}>
                                                   {formatBytes(table.size_bytes)}
                                                 </span>
@@ -2080,7 +2086,7 @@ export const Explorer: React.FC = () => {
 
                                           {/* Columns List */}
                                           {isTableExpanded && table.children && (
-                                            <div className="ml-3 pl-2 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
+                                            <div className="ml-2 pl-1.5 border-l border-white/5 flex flex-col gap-0.5 mt-0.5">
                                               {table.children.map((col: SchemaColumnNode) => (
                                                 <div
                                                   key={col.name}
@@ -2826,20 +2832,27 @@ export const Explorer: React.FC = () => {
               against a collection. Mongo gets its own actions above instead. */}
           {!isMongoEngine(tableContextMenu.conn.engine) && (
             <>
-          <button
-            onClick={() => {
-              setStructureCtx({
-                conn: tableContextMenu.conn,
-                group: tableContextMenu.group,
-                table: tableContextMenu.table,
-              });
-              setTableContextMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-cyan-400"
-          >
-            <Info className="w-3.5 h-3.5" />
-            <span>Edit</span>
-          </button>
+          {/* "Edit" opens the table-structure modal, which builds ALTER TABLE
+              statements — invalid SQL against a view (needs ALTER VIEW /
+              CREATE OR REPLACE VIEW instead). Views get "Edit View
+              Definition..." below (opens the SQL code editor) as their only
+              edit action, so this is table-only. */}
+          {tableContextMenu.table.node_type !== 'view' && (
+            <button
+              onClick={() => {
+                setStructureCtx({
+                  conn: tableContextMenu.conn,
+                  group: tableContextMenu.group,
+                  table: tableContextMenu.table,
+                });
+                setTableContextMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-cyan-400"
+            >
+              <Info className="w-3.5 h-3.5" />
+              <span>Edit</span>
+            </button>
+          )}
 
           {tableContextMenu.table.node_type === 'view' && (
             <button
@@ -2855,7 +2868,7 @@ export const Explorer: React.FC = () => {
               className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-cyan-400"
             >
               <Eye className="w-3.5 h-3.5" />
-              <span>Edit View Definition...</span>
+              <span>Edit</span>
             </button>
           )}
 
@@ -3344,30 +3357,77 @@ export const Explorer: React.FC = () => {
             <span>Manage Tags…</span>
           </button>
 
-          {/* Show system schemas (pg_catalog / information_schema / mysql / sys …).
-              Mirrors the Settings → Query Execution toggle, surfaced here so it's
-              one right-click away. Refreshes every expanded connection on toggle. */}
-          <button
-            onClick={() => {
-              setShowSystemSchemas(!showSystemSchemas);
-              // Re-fetch expanded trees so the change is visible immediately.
-              setTimeout(() => {
-                expandedConnIds.forEach((id) => {
-                  const c = connections.find((cc) => cc.id === id);
-                  if (c) loadSchemaForConnection(c);
-                });
-              }, 0);
-              setExplorerCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
-          >
-            {showSystemSchemas ? (
-              <Check className="w-3.5 h-3.5 text-cyan-400" />
-            ) : (
-              <Database className="w-3.5 h-3.5 text-slate-500" />
+          {/* Show ▸ — tree display toggles, grouped into one submenu so this
+              doesn't grow into a wall of checkboxes at the top level as more
+              get added. */}
+          <ContextSubMenu label="Show" icon={<Eye className="w-3.5 h-3.5" />} tone="text-slate-300" panelWidth={200}>
+            {(close) => (
+              <>
+                {/* System schemas (pg_catalog / information_schema / mysql / sys …).
+                    Mirrors the Settings → Query Execution toggle, surfaced here so
+                    it's a couple clicks away. Refreshes every expanded connection
+                    on toggle. */}
+                <button
+                  onClick={() => {
+                    setShowSystemSchemas(!showSystemSchemas);
+                    // Re-fetch expanded trees so the change is visible immediately.
+                    setTimeout(() => {
+                      expandedConnIds.forEach((id) => {
+                        const c = connections.find((cc) => cc.id === id);
+                        if (c) loadSchemaForConnection(c);
+                      });
+                    }, 0);
+                    close();
+                    setExplorerCtxMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showSystemSchemas ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <Database className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>System Schemas</span>
+                </button>
+
+                {/* Per-table row-count badge (and the schema/database header's
+                    aggregate row count, folded into its size-badge tooltip). */}
+                <button
+                  onClick={() => {
+                    setShowRowCounts(!showRowCounts);
+                    close();
+                    setExplorerCtxMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showRowCounts ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <Hash className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Row Counts</span>
+                </button>
+
+                {/* Per-table size badge (and the schema/database header's
+                    aggregate size badge). */}
+                <button
+                  onClick={() => {
+                    setShowTableSizes(!showTableSizes);
+                    close();
+                    setExplorerCtxMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showTableSizes ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <HardDrive className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Table Sizes</span>
+                </button>
+              </>
             )}
-            <span>Show System Schemas</span>
-          </button>
+          </ContextSubMenu>
 
           <div className="h-px bg-[#1e293b] my-1" />
 
@@ -4668,6 +4728,82 @@ export const Explorer: React.FC = () => {
             <TagIcon className="w-2.5 h-2.5" />
             {folderContextMenu.tag ? folderContextMenu.tag.label : 'Other'}
           </div>
+
+          <button
+            onClick={() => {
+              useConnectionStore.getState().openNewConnectionForTag(folderContextMenu.tag?.id ?? null);
+              setFolderContextMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>New Connection…</span>
+          </button>
+
+          {/* Show ▸ — same tree display toggles as the global Explorer
+              context menu, surfaced here too so they're reachable without
+              right-clicking empty tree space. */}
+          <ContextSubMenu label="Show" icon={<Eye className="w-3.5 h-3.5" />} tone="text-slate-300" panelWidth={200}>
+            {(close) => (
+              <>
+                <button
+                  onClick={() => {
+                    setShowSystemSchemas(!showSystemSchemas);
+                    setTimeout(() => {
+                      expandedConnIds.forEach((id) => {
+                        const c = connections.find((cc) => cc.id === id);
+                        if (c) loadSchemaForConnection(c);
+                      });
+                    }, 0);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showSystemSchemas ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <Database className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>System Schemas</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShowRowCounts(!showRowCounts);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showRowCounts ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <Hash className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Row Counts</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShowTableSizes(!showTableSizes);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showTableSizes ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <HardDrive className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Table Sizes</span>
+                </button>
+              </>
+            )}
+          </ContextSubMenu>
+
+          <div className="h-px bg-[#1e293b] my-1" />
 
           {folderContextMenu.tag && (
             <>

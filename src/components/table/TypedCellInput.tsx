@@ -1,7 +1,7 @@
 import React from 'react';
 import { DateTimePicker } from './DateTimePicker';
 
-export type EditorKind = 'date' | 'datetime' | 'time' | 'number' | 'boolean' | 'longtext' | 'json' | 'text';
+export type EditorKind = 'date' | 'datetime' | 'time' | 'number' | 'boolean' | 'longtext' | 'json' | 'enum' | 'text';
 
 /** A raw cell value as it arrives from the backend (already decoded). */
 export type CellValue = string | number | boolean | null;
@@ -108,6 +108,8 @@ interface TypedCellInputProps {
   autoFocus?: boolean;
   placeholder?: string;
   className?: string;
+  /** Required when kind === 'enum' — the column's allowed labels. */
+  enumValues?: string[] | null;
 }
 
 // Fixed height + box-border on every variant so a row's height never jumps
@@ -126,6 +128,7 @@ export const TypedCellInput: React.FC<TypedCellInputProps> = ({
   autoFocus,
   placeholder,
   className,
+  enumValues,
 }) => {
   const cls = className || DEFAULT_CLASS;
 
@@ -142,6 +145,26 @@ export const TypedCellInput: React.FC<TypedCellInputProps> = ({
         <option value="">NULL</option>
         <option value="1">TRUE</option>
         <option value="0">FALSE</option>
+      </select>
+    );
+  }
+
+  // Enum column — a dropdown of the type's actual allowed labels (Navicat-
+  // style), not free text a user could mistype into an invalid value. Falls
+  // through to plain text below if the caller didn't supply the list (e.g.
+  // MySQL enum columns, whose labels aren't fetched yet).
+  if (kind === 'enum' && enumValues && enumValues.length > 0) {
+    return (
+      <select
+        autoFocus={autoFocus}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={onBlur}
+        onKeyDown={onKeyDown}
+        className={cls}
+      >
+        <option value="">NULL</option>
+        {enumValues.map((v) => <option key={v} value={v}>{v}</option>)}
       </select>
     );
   }

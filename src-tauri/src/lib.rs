@@ -3,6 +3,7 @@ pub mod commands;
 use commands::query::QueryRegistry;
 use commands::s3::TransferRegistry;
 use commands::backend::PendingLogin;
+use commands::migrate::MigrationRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -24,6 +25,9 @@ pub fn run() {
         // Transfer registry for cancellable S3 uploads/downloads. Same shape as
         // the query registry; lives independently so the two never collide.
         .manage(TransferRegistry(Arc::new(Mutex::new(HashMap::new()))))
+        // Cancellable MySQL → PostgreSQL migrations. Same shape as the two
+        // registries above; independent so it never collides with them.
+        .manage(MigrationRegistry(Arc::new(Mutex::new(HashMap::new()))))
         // Holds the CSRF-style `state` nonce between backend_open_login and the
         // rdsql://auth/callback deep link — see commands::backend's module doc.
         .manage(PendingLogin(Arc::new(Mutex::new(None))))
@@ -181,11 +185,16 @@ pub fn run() {
             let sync_schema = MenuItemBuilder::with_id("sync_schema", "Sync Schema...")
                 .build(app)?;
 
+            let migrate_to_postgres = MenuItemBuilder::with_id("migrate_to_postgres", "Migrate Database...")
+                .build(app)?;
+
             let tools_menu = SubmenuBuilder::new(app, "Tools")
                 .item(&compare_schemas)
                 .item(&compare_data)
                 .separator()
                 .item(&sync_schema)
+                .separator()
+                .item(&migrate_to_postgres)
                 .build()?;
 
             // Build Help Submenu
@@ -195,10 +204,15 @@ pub fn run() {
             let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates...")
                 .build(app)?;
 
+            let report_bug = MenuItemBuilder::with_id("report_bug", "Report Bug...")
+                .build(app)?;
+
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&about_item)
                 .separator()
                 .item(&check_updates)
+                .separator()
+                .item(&report_bug)
                 .build()?;
 
             // Build App Menu (macOS app menu)
@@ -280,11 +294,24 @@ pub fn run() {
                 "sync_schema" => {
                     let _ = app.emit("menu_action", "sync_schema");
                 }
+                "migrate_to_postgres" => {
+                    let _ = app.emit("menu_action", "migrate_to_postgres");
+                }
                 "check_updates" => {
                     let _ = app.emit("menu_action", "check_updates");
                 }
                 "about" => {
                     let _ = app.emit("menu_action", "about");
+                }
+                "report_bug" => {
+                    // Opened directly here (not routed through the frontend via
+                    // `menu_action`) — same pattern as `backend_open_login` in
+                    // commands/backend.rs — since this is a pure "open this URL"
+                    // action with no in-app state to touch.
+                    use tauri_plugin_opener::OpenerExt;
+                    let _ = app
+                        .opener()
+                        .open_url("https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml", None::<&str>);
                 }
                 "quit" => {
                     app.exit(0);
@@ -317,6 +344,11 @@ pub fn run() {
             commands::compare::generate_schema_sync_sql,
             commands::compare::apply_schema_sync,
             commands::updater::check_for_update,
+            // Cross-engine database migration wizard (isolated module; all
+            // commands are additive).
+            commands::migrate::db_migrate_plan_tables,
+            commands::migrate::db_migrate_run,
+            commands::migrate::db_migrate_cancel,
             // S3-compatible storage (isolated module; all commands are additive).
             commands::s3::s3_test_connection,
             commands::s3::s3_list_objects,

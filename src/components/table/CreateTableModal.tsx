@@ -4,7 +4,8 @@ import { DatabaseConnection } from '../../core/domain/types';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { quoteIdent, qualifiedTable, resolveTargetDatabase } from '../../core/sql/ident';
-import { getGroupedTypeOptions, getTypeOptions } from '../../core/sql/dataTypes';
+import { getGroupedTypeOptions, getTypeOptions, isEnumType } from '../../core/sql/dataTypes';
+import { EnumValuesInput } from './EnumValuesInput';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { generateSQL } from '../../core/ai/client';
@@ -316,8 +317,8 @@ export const CreateTableModal: React.FC<CreateTableModalProps> = ({
               </div>
               <div className="max-h-56 overflow-y-auto">
                 {cols.map((c) => (
+                  <React.Fragment key={c.id}>
                   <div
-                    key={c.id}
                     className="grid grid-cols-[1fr_1.1fr_auto_auto_auto] gap-2 px-2 py-1.5 items-center border-t border-[#1e293b]/50"
                   >
                     <input
@@ -372,6 +373,16 @@ export const CreateTableModal: React.FC<CreateTableModalProps> = ({
                       <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
+                  {isEnumType(c.type) && (
+                    <div className="px-2 pb-1.5 -mt-1 border-t-0">
+                      <EnumValuesInput
+                        value={/^enum\s*\((.*)\)\s*$/i.exec(c.type)?.[1] ?? ''}
+                        onChange={(inner) => updateCol(c.id, { type: `enum(${inner})` })}
+                        className="w-full h-7 box-border bg-[#06090e] border border-[#1e293b] focus:border-blue-500 rounded px-2 text-[11px] text-slate-100 focus:outline-none font-mono"
+                      />
+                    </div>
+                  )}
+                  </React.Fragment>
                 ))}
               </div>
             </div>

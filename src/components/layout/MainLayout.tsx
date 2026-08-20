@@ -19,6 +19,7 @@ import { ObjectEditor } from '../editor/ObjectEditor';
 import { TableDataView } from '../table/TableDataView';
 import { VisualERDCanvas } from '../erd/VisualERDCanvas';
 import { MigrationStudio } from '../migration/MigrationStudio';
+import { DatabaseMigrationWizard } from '../migrate/DatabaseMigrationWizard';
 import { PluginMarketplace } from '../plugins/PluginMarketplace';
 import { StorageBrowser } from '../storage/StorageBrowser';
 import { RedisBrowser } from '../redis/RedisBrowser';
@@ -164,6 +165,9 @@ export const MainLayout: React.FC = () => {
         case 'compare_data':
         case 'sync_schema':
           setActiveView('migration');
+          break;
+        case 'migrate_to_postgres':
+          setActiveView('pgMigrate');
           break;
         case 'check_updates':
           // Explicit user request — always report the outcome, even "up to date".
@@ -459,6 +463,8 @@ export const MainLayout: React.FC = () => {
           </div>
         ) : activeView === 'migration' ? (
           <MigrationStudio />
+        ) : activeView === 'pgMigrate' ? (
+          <DatabaseMigrationWizard />
         ) : activeView === 'health' ? (
           <DatabaseHealthView />
         ) : activeView === 'plugins' ? (

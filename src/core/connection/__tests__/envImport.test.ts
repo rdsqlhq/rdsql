@@ -13,6 +13,19 @@ describe('parseEnvOrUrl', () => {
     expect(out.appliedKeys).toContain('host');
   });
 
+  it('parses a bare postgresql:// URL with a query string', () => {
+    // Regression: `?schema=public` contains `=`, which used to make
+    // `looksLikeUrl` misclassify the whole line as a `KEY=VALUE` env line
+    // instead of a URL, so nothing got filled.
+    const out = parseEnvOrUrl('postgresql://mymp_clone:iLbbWxTDWhCbFCyc@157.173.221.216:15432/mymp_clone?schema=public');
+    expect(out.engine).toBe('postgres');
+    expect(out.host).toBe('157.173.221.216');
+    expect(out.port).toBe(15432);
+    expect(out.username).toBe('mymp_clone');
+    expect(out.password).toBe('iLbbWxTDWhCbFCyc');
+    expect(out.database).toBe('mymp_clone');
+  });
+
   it('parses a mysql:// URL with default port fallback', () => {
     const out = parseConnectionUrl('mysql://root@localhost/corp');
     expect(out.engine).toBe('mysql');
