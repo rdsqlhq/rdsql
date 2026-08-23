@@ -589,6 +589,18 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     CASE
                         WHEN col.data_type = 'ARRAY' THEN substring(col.udt_name from 2) || '[]'
                         WHEN col.data_type = 'USER-DEFINED' THEN col.udt_name
+                        -- Bare `information_schema.columns.data_type` drops the
+                        -- length/precision entirely (e.g. a `varchar(255)`
+                        -- column reports just 'character varying') — the Table
+                        -- Structure grid's Length/Set column showed blank for
+                        -- every existing Postgres varchar/numeric column even
+                        -- though the DB has a real value. Both fields are
+                        -- already available on the same joined `col` row, no
+                        -- extra join needed.
+                        WHEN col.character_maximum_length IS NOT NULL
+                            THEN col.data_type || '(' || col.character_maximum_length::text || ')'
+                        WHEN col.data_type IN ('numeric', 'decimal') AND col.numeric_precision IS NOT NULL
+                            THEN col.data_type || '(' || col.numeric_precision::text || ',' || COALESCE(col.numeric_scale, 0)::text || ')'
                         ELSE col.data_type
                     END AS data_type,
                     CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk,

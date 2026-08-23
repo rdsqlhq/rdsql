@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import {
   X,
@@ -22,11 +22,14 @@ import {
   Link2,
   Sparkles,
   List,
+  ArrowUp,
+  ArrowDown,
+  Undo2,
 } from 'lucide-react';
 import { SchemaTableNode, SchemaColumnNode, DatabaseConnection, QueryResultData } from '../../core/domain/types';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { quoteIdent, qualifiedTable } from '../../core/sql/ident';
-import { isPostgresFamily } from '../../core/connection/engines';
+import { isPostgresFamily, isMysqlFamily } from '../../core/connection/engines';
 import { getGroupedTypeOptions, getTypeOptions, isEnumType, parseEnumInner, buildEnumInner } from '../../core/sql/dataTypes';
 import { EnumValuesInput } from './EnumValuesInput';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
@@ -61,15 +64,32 @@ interface TableStructureModalProps {
 const INPUT_CLS = 'h-8 box-border w-full bg-[#06090e] border border-[#1e293b] rounded-lg px-2 text-xs text-slate-100 focus:outline-none focus:border-blue-500';
 const INPUT_CLS_SM = 'h-7 box-border w-full bg-[#06090e] border border-[#1e293b] rounded-lg px-2 text-[11px] text-slate-400 focus:outline-none focus:border-blue-500/50';
 
-interface DraftCol {
+/** One column row in the always-editable Columns grid — every field is
+ *  live-editable directly in the table (HeidiSQL-style), staged locally
+ *  until Save builds the whole batch of ALTER TABLE statements at once.
+ *  `origName: null` marks a column added in this session that doesn't
+ *  exist in the DB yet; `removed: true` stages an existing column for
+ *  DROP COLUMN (shown struck through, undoable before Save). */
+interface ColDraft {
+  /** Stable React key — `origName`, or a generated id for a new column
+   *  (can't use `name` since the user is free to retype it while editing). */
+  id: string;
+  origName: string | null;
   name: string;
-  /** Base type only — e.g. `varchar`, `int`, `decimal`. */
+  /** Base type only — e.g. `varchar`, `int`, `decimal`, `enum`. */
   type: string;
-  /** Length/precision in parens — e.g. `255`, `10,2`, or `''` when none. */
+  /** Length/precision/set-or-enum-values content — e.g. `255`, `10,2`,
+   *  `'a','b'`, or `''` when the type takes none. */
   length: string;
+  /** MySQL/MariaDB numeric types only — rendered/settable only there. */
+  unsigned: boolean;
   nullable: boolean;
-  pk: boolean;
+  /** Only ever SET here, never silently cleared — see the comment on
+   *  `defaultValue`/`comment` in `toColDraft` for why. */
+  defaultValue: string;
   comment: string;
+  pk: boolean;
+  removed: boolean;
 }
 
 /**
@@ -90,17 +110,49 @@ function joinType(type: string, length: string): string {
   return `${t}(${length.trim()})`;
 }
 
-const toDraft = (c: SchemaColumnNode): DraftCol => {
-  const { type, length } = splitType(c.data_type);
+/** MySQL/MariaDB reports an unsigned numeric column's type with a trailing
+ *  " unsigned" (e.g. `int(10) unsigned`) — split that off before `splitType`
+ *  parses the rest, and add it back via `colDraftFullType` below. */
+function splitUnsigned(full: string): { base: string; unsigned: boolean } {
+  const m = /^(.*)\s+unsigned$/i.exec(full.trim());
+  return m ? { base: m[1].trim(), unsigned: true } : { base: full, unsigned: false };
+}
+
+/** Base type names `Unsigned` is meaningful for (MySQL/MariaDB numeric
+ *  family) — showing the checkbox for `varchar`/`enum`/etc. would just be
+ *  confusing since those engines reject `UNSIGNED` on non-numeric types. */
+const UNSIGNED_TYPE_RE = /^(tiny|small|medium|big)?int(eger)?$|^(decimal|numeric|float|double)/i;
+
+const toColDraft = (c: SchemaColumnNode): ColDraft => {
+  const { base, unsigned } = splitUnsigned(c.data_type || '');
+  const { type, length } = splitType(base);
   return {
+    id: c.name,
+    origName: c.name,
     name: c.name,
     type,
     length,
+    unsigned,
     nullable: c.is_nullable !== false,
-    pk: !!c.is_primary_key,
+    // `SchemaColumnNode` only exposes whether a default/comment EXISTS
+    // (`has_default`), not its text — showing a wrong or stale value would
+    // be worse than showing none, so these start blank for existing
+    // columns. Save only ever emits SET DEFAULT / comment SQL when the
+    // user actually types something non-empty here — never DROP DEFAULT —
+    // specifically so a blank field (which could mean "no default" OR
+    // "has one, just not shown") can never silently clear an existing one.
+    defaultValue: '',
     comment: '',
+    pk: !!c.is_primary_key,
+    removed: false,
   };
 };
+
+/** Recombine a draft's type/length/unsigned back into one DDL type string. */
+function colDraftFullType(d: ColDraft): string {
+  const base = joinType(d.type, d.length);
+  return d.unsigned ? `${base} unsigned` : base;
+}
 
 export const TableStructureModal: React.FC<TableStructureModalProps> = ({
   isOpen,
@@ -115,13 +167,19 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
   const [activeTab, setActiveTab] = useState<'columns' | 'indexes' | 'foreignKeys' | 'enumTypes' | 'ddl'>('columns');
   const [copied, setCopied] = useState(false);
 
-  // Add-column form
-  const [isAddingColumn, setIsAddingColumn] = useState(false);
-  const [newCol, setNewCol] = useState<DraftCol>({ name: '', type: 'varchar', length: '255', nullable: true, pk: false, comment: '' });
-
-  // Inline edit (per column)
-  const [editingName, setEditingName] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState<DraftCol | null>(null);
+  // Columns grid — every row always editable (HeidiSQL-style), staged
+  // locally until Save builds the batch of ALTER TABLE statements. Resynced
+  // from `columns` whenever the prop changes (i.e. after a save completes
+  // and the parent refetches the schema) so the grid reflects the DB again;
+  // Discard re-runs the same derivation on demand mid-edit.
+  const [colDrafts, setColDrafts] = useState<ColDraft[]>(() => columns.map(toColDraft));
+  useEffect(() => {
+    setColDrafts(columns.map(toColDraft));
+  }, [columns]);
+  const originalColDrafts = useMemo(() => columns.map(toColDraft), [columns]);
+  const colsDirty = JSON.stringify(colDrafts) !== JSON.stringify(originalColDrafts);
+  // Right-click context menu on a column row.
+  const [colContextMenu, setColContextMenu] = useState<{ x: number; y: number; index: number } | null>(null);
 
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -252,6 +310,14 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     return () => document.removeEventListener('mousedown', onDown);
   }, [enumPopoverFor]);
 
+  // Close the column row context menu on any outside click.
+  useEffect(() => {
+    if (!colContextMenu) return;
+    const onDown = () => setColContextMenu(null);
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [colContextMenu]);
+
   // ── DDL runner ──────────────────────────────────────────────────────────
   const runDdl = async (sql: string, label: string) => {
     setRunning(true);
@@ -265,11 +331,9 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
       });
       setInfo(`${label} applied. Refreshing schema…`);
       onSchemaChanged();
-      // Clear local editing state — the refreshed `columns` prop replaces it.
-      setIsAddingColumn(false);
-      setNewCol({ name: '', type: 'varchar', length: '255', nullable: true, pk: false, comment: '' });
-      setEditingName(null);
-      setEditDraft(null);
+      // Local `colDrafts` resyncs itself from the refreshed `columns` prop
+      // (see the effect above) once the parent's refetch lands.
+      setColContextMenu(null);
       // Re-fetch indexes / FKs so the modal reflects the change immediately.
       void refreshMeta();
     } catch (err: any) {
@@ -280,96 +344,199 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     }
   };
 
-  // ── Columns: add / edit / drop ──────────────────────────────────────────
-  const handleAdd = () => {
-    if (!newCol.name.trim()) {
-      setError('Column name is required.');
-      return;
-    }
-    const fullType = joinType(newCol.type, newCol.length);
-    const ident = quoteIdent(engine, newCol.name.trim());
-    // T-SQL's ADD clause takes the column definition directly — no COLUMN keyword.
-    const isMssql = engine === 'mssql';
-    let sql = isMssql ? `ALTER TABLE ${tbl} ADD ${ident} ${fullType}` : `ALTER TABLE ${tbl} ADD COLUMN ${ident} ${fullType}`;
-    if (!newCol.nullable) sql += ' NOT NULL';
-    sql += ';';
-    // Attach a comment if provided + supported.
-    if (newCol.comment.trim() && supportsColumnComment(engine)) {
-      const commentSql = setColumnCommentSql(engine, schemaName, tableName, newCol.name.trim(), newCol.comment.trim(), fullType);
-      if (commentSql) sql += '\n' + commentSql;
-    }
-    runDdl(sql, `Column "${newCol.name.trim()}" added`);
+  // ── Columns: always-editable grid, staged, saved as one batch ───────────
+  const addColRow = () => {
+    setColDrafts((prev) => [
+      ...prev,
+      {
+        id: `new_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        origName: null,
+        name: '',
+        type: 'varchar',
+        length: '255',
+        unsigned: false,
+        nullable: true,
+        defaultValue: '',
+        comment: '',
+        pk: false,
+        removed: false,
+      },
+    ]);
+    setColContextMenu(null);
   };
 
-  const startEdit = (c: SchemaColumnNode) => {
-    setEditingName(c.name);
-    setEditDraft(toDraft(c));
+  /** A not-yet-saved new column is dropped from the draft outright; an
+   *  existing one is just flagged (shown struck through, undoable) — the
+   *  actual DROP COLUMN only happens on Save. */
+  const toggleRemoveColRow = (id: string) => {
+    setColDrafts((prev) => {
+      const target = prev.find((c) => c.id === id);
+      if (!target) return prev;
+      if (target.origName === null) return prev.filter((c) => c.id !== id);
+      return prev.map((c) => (c.id === id ? { ...c, removed: !c.removed } : c));
+    });
+    setColContextMenu(null);
+  };
+
+  const updateColRow = (id: string, patch: Partial<ColDraft>) => {
+    setColDrafts((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+  };
+
+  /** MySQL/MariaDB only — the only engine with `AFTER`/`FIRST` support, so
+   *  the Up/Down controls that call this are hidden for every other engine. */
+  const moveColRow = (index: number, dir: -1 | 1) => {
+    setColDrafts((prev) => {
+      const target = index + dir;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+    setColContextMenu(null);
+  };
+
+  const discardColChanges = () => {
+    setColDrafts(columns.map(toColDraft));
     setError(null);
     setInfo(null);
   };
 
-  const handleSaveEdit = (original: SchemaColumnNode) => {
-    if (!editDraft) return;
-    if (!editDraft.name.trim()) {
-      setError('Column name is required.');
-      return;
-    }
-    const newFullType = joinType(editDraft.type, editDraft.length);
-    const oldIdent = quoteIdent(engine, original.name);
-    const newIdent = quoteIdent(engine, editDraft.name.trim());
-    const statements: string[] = [];
-    const isMysqlFamily = engine === 'mysql';
+  const handleSaveColumns = () => {
+    const isMysql = isMysqlFamily(engine);
     const isMssql = engine === 'mssql';
-    if (original.name !== editDraft.name.trim()) {
-      if (isMysqlFamily) {
-        statements.push(
-          `ALTER TABLE ${tbl} CHANGE COLUMN ${oldIdent} ${newIdent} ${newFullType}${editDraft.nullable ? '' : ' NOT NULL'};`
-        );
-      } else if (isMssql) {
-        // T-SQL has no RENAME COLUMN — sp_rename takes the unquoted,
-        // dot-qualified object name as a plain string.
-        const objName = `${schemaName ? `${schemaName}.` : ''}${tableName}.${original.name}`.replace(/'/g, "''");
-        statements.push(`EXEC sp_rename '${objName}', '${editDraft.name.trim()}', 'COLUMN';`);
-      } else {
-        statements.push(`ALTER TABLE ${tbl} RENAME COLUMN ${oldIdent} TO ${newIdent};`);
+    const activeDrafts = colDrafts.filter((d) => !d.removed);
+
+    for (const d of activeDrafts) {
+      if (!d.name.trim()) {
+        setError('Every column needs a name.');
+        return;
+      }
+      // MySQL/MariaDB reject a bare VARCHAR/CHAR outright ("VARCHAR requires
+      // a length argument") — catch it here with a clear message instead of
+      // a raw DB error after the statement's already been sent.
+      if (isMysql && /^(var)?char$/i.test(d.type.trim()) && !d.length.trim()) {
+        setError(`Column "${d.name.trim()}": ${d.type} needs a length on MySQL/MariaDB (e.g. ${d.type}(255)).`);
+        return;
       }
     }
-    const typeHandledByChange = isMysqlFamily;
-    if (isMssql) {
-      // T-SQL combines type + nullability into one ALTER COLUMN statement,
-      // and always requires an explicit NULL/NOT NULL.
-      if ((original.data_type || '') !== newFullType || (original.is_nullable !== false) !== editDraft.nullable) {
-        statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} ${newFullType} ${editDraft.nullable ? 'NULL' : 'NOT NULL'};`);
+
+    const statements: string[] = [];
+
+    // 1. Drops first — freeing up names a new/renamed column might reuse.
+    for (const d of colDrafts) {
+      if (d.removed && d.origName) {
+        statements.push(`ALTER TABLE ${tbl} DROP COLUMN ${quoteIdent(engine, d.origName)};`);
       }
-    } else {
-      if (!typeHandledByChange && (original.data_type || '') !== newFullType) {
-        statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} TYPE ${newFullType};`);
+    }
+
+    // 2. New columns.
+    for (const d of activeDrafts) {
+      if (d.origName !== null) continue;
+      const fullType = colDraftFullType(d);
+      const ident = quoteIdent(engine, d.name.trim());
+      // T-SQL's ADD clause takes the column definition directly — no COLUMN keyword.
+      let sql = isMssql ? `ALTER TABLE ${tbl} ADD ${ident} ${fullType}` : `ALTER TABLE ${tbl} ADD COLUMN ${ident} ${fullType}`;
+      if (!d.nullable) sql += ' NOT NULL';
+      // Every engine here (Postgres, MySQL/MariaDB, SQLite, T-SQL) accepts
+      // an inline DEFAULT in ADD COLUMN's own column definition — no
+      // separate statement needed, unlike retrofitting a default onto an
+      // EXISTING column (T-SQL has no ALTER COLUMN ... SET DEFAULT at all;
+      // see the mssql branch below for that case).
+      if (d.defaultValue.trim()) sql += ` DEFAULT ${d.defaultValue.trim()}`;
+      sql += ';';
+      statements.push(sql);
+      if (d.comment.trim() && supportsColumnComment(engine)) {
+        const commentSql = setColumnCommentSql(engine, schemaName, tableName, d.name.trim(), d.comment.trim(), fullType);
+        if (commentSql) statements.push(commentSql);
       }
-      if (!typeHandledByChange) {
-        const wasNullable = original.is_nullable !== false;
-        if (wasNullable && !editDraft.nullable) {
-          statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} SET NOT NULL;`);
-        } else if (!wasNullable && editDraft.nullable) {
-          statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} DROP NOT NULL;`);
+    }
+
+    // 3. Existing columns — rename / retype / nullability / default / comment.
+    // Position (reorder) is handled separately in step 4, after every name
+    // change here has already landed, so AFTER/FIRST clauses can safely
+    // reference final names.
+    for (const d of activeDrafts) {
+      if (d.origName === null) continue;
+      const original = columns.find((c) => c.name === d.origName);
+      if (!original) continue;
+      const newFullType = colDraftFullType(d);
+      const oldIdent = quoteIdent(engine, d.origName);
+      const newIdent = quoteIdent(engine, d.name.trim());
+      const nameChanged = d.origName !== d.name.trim();
+      const typeChanged = (original.data_type || '').toLowerCase() !== newFullType.toLowerCase();
+      const nullChanged = (original.is_nullable !== false) !== d.nullable;
+
+      if (isMysql) {
+        if (nameChanged || typeChanged || nullChanged || d.defaultValue.trim() || d.comment.trim()) {
+          let sql = `ALTER TABLE ${tbl} CHANGE COLUMN ${oldIdent} ${newIdent} ${newFullType}${d.nullable ? '' : ' NOT NULL'}`;
+          if (d.defaultValue.trim()) sql += ` DEFAULT ${d.defaultValue.trim()}`;
+          if (d.comment.trim()) sql += ` COMMENT '${d.comment.trim().replace(/'/g, "''")}'`;
+          sql += ';';
+          statements.push(sql);
         }
+      } else if (isMssql) {
+        if (nameChanged) {
+          // T-SQL has no RENAME COLUMN — sp_rename takes the unquoted,
+          // dot-qualified object name as a plain string.
+          const objName = `${schemaName ? `${schemaName}.` : ''}${tableName}.${d.origName}`.replace(/'/g, "''");
+          statements.push(`EXEC sp_rename '${objName}', '${d.name.trim()}', 'COLUMN';`);
+        }
+        // T-SQL combines type + nullability into one ALTER COLUMN statement,
+        // and always requires an explicit NULL/NOT NULL.
+        if (typeChanged || nullChanged) {
+          statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} ${newFullType} ${d.nullable ? 'NULL' : 'NOT NULL'};`);
+        }
+        if (d.defaultValue.trim()) {
+          statements.push(`ALTER TABLE ${tbl} ADD DEFAULT ${d.defaultValue.trim()} FOR ${newIdent};`);
+        }
+      } else {
+        // Postgres / SQLite / everything else: one statement per aspect.
+        if (nameChanged) statements.push(`ALTER TABLE ${tbl} RENAME COLUMN ${oldIdent} TO ${newIdent};`);
+        if (typeChanged) statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} TYPE ${newFullType};`);
+        if (nullChanged) {
+          statements.push(
+            original.is_nullable === false
+              ? `ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} DROP NOT NULL;`
+              : `ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} SET NOT NULL;`
+          );
+        }
+        if (d.defaultValue.trim()) statements.push(`ALTER TABLE ${tbl} ALTER COLUMN ${newIdent} SET DEFAULT ${d.defaultValue.trim()};`);
+      }
+      if (d.comment.trim() && supportsColumnComment(engine) && !isMysql) {
+        const commentSql = setColumnCommentSql(engine, schemaName, tableName, d.name.trim(), d.comment.trim(), newFullType);
+        if (commentSql) statements.push(commentSql);
       }
     }
-    if (editDraft.comment.trim() && supportsColumnComment(engine)) {
-      const commentSql = setColumnCommentSql(engine, schemaName, tableName, editDraft.name.trim(), editDraft.comment.trim(), newFullType);
-      if (commentSql) statements.push(commentSql);
+
+    // 4. Reorder (MySQL/MariaDB only — the only engine with AFTER/FIRST).
+    // Re-pins every column's full position whenever ANYTHING moved, rather
+    // than computing a minimal diff of just the columns that changed slot —
+    // simpler to get right, and this runs once, not in a hot path.
+    if (isMysql) {
+      const finalOrder = activeDrafts.map((d) => d.name.trim());
+      const survivingFinalNames = columns
+        .map((c) => c.name)
+        .filter((name) => activeDrafts.some((d) => d.origName === name))
+        .map((name) => activeDrafts.find((d) => d.origName === name)!.name.trim());
+      const newFinalNames = activeDrafts.filter((d) => d.origName === null).map((d) => d.name.trim());
+      const impliedOrder = [...survivingFinalNames, ...newFinalNames];
+      if (JSON.stringify(finalOrder) !== JSON.stringify(impliedOrder)) {
+        activeDrafts.forEach((d, i) => {
+          const fullType = colDraftFullType(d);
+          const ident = quoteIdent(engine, d.name.trim());
+          let sql = `ALTER TABLE ${tbl} MODIFY COLUMN ${ident} ${fullType}${d.nullable ? '' : ' NOT NULL'}`;
+          sql += i === 0 ? ' FIRST' : ` AFTER ${quoteIdent(engine, activeDrafts[i - 1].name.trim())}`;
+          sql += ';';
+          statements.push(sql);
+        });
+      }
     }
+
     if (statements.length === 0) {
-      setEditingName(null);
       setInfo('No changes to save.');
       return;
     }
-    runDdl(statements.join('\n'), `Column "${original.name}" updated`);
-  };
-
-  const handleRemove = (c: SchemaColumnNode) => {
-    if (!window.confirm(`Drop column "${c.name}" from ${tableName}? This cannot be undone.`)) return;
-    const ident = quoteIdent(engine, c.name);
-    runDdl(`ALTER TABLE ${tbl} DROP COLUMN ${ident};`, `Column "${c.name}" dropped`);
+    runDdl(statements.join('\n'), 'Columns updated');
   };
 
   // ── Indexes: add / edit / drop ──────────────────────────────────────────
@@ -742,20 +909,6 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     return <Type className="w-3.5 h-3.5 text-blue-400 shrink-0" />;
   };
 
-  // ── Type-pill color helper (matches the icon palette) ───────────────────
-  const typePillClass = (dataType?: string): string => {
-    if (!dataType) return 'bg-slate-500/15 text-slate-400';
-    const dt = dataType.toLowerCase();
-    if (dt.includes('int') || dt.includes('float') || dt.includes('double') || dt.includes('numeric') || dt.includes('decimal')) {
-      return 'bg-amber-500/15 text-amber-400';
-    }
-    if (dt.includes('date') || dt.includes('time') || dt.includes('timestamp')) {
-      return 'bg-cyan-500/15 text-cyan-400';
-    }
-    if (dt.includes('bool')) return 'bg-purple-500/15 text-purple-400';
-    return 'bg-blue-500/15 text-blue-400';
-  };
-
   const indexCount = indexes.length;
   const fkCount = foreignKeys.length;
 
@@ -839,59 +992,67 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
           {/* ── Columns ─────────────────────────────────────────────────── */}
           {activeTab === 'columns' && (
             <div className="space-y-2.5">
-              <div className="border border-[#1e293b] rounded-xl overflow-hidden bg-[#0a0f18]">
+              <div className="border border-[#1e293b] rounded-xl overflow-hidden bg-[#0a0f18] overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead className="bg-[#0f172a] border-b border-[#1e293b] text-slate-400 uppercase text-[10px] tracking-wider">
                     <tr>
                       <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-9 text-center">#</th>
-                      <th className="py-1.5 px-2.5 border-r border-[#1e293b]">Field Name</th>
+                      <th className="py-1.5 px-2.5 border-r border-[#1e293b]">Name</th>
                       <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-40">Type</th>
-                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-20">Length</th>
-                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] text-center w-20">Flags</th>
+                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-32">Length/Set</th>
+                      {isMysqlFamily(engine) && (
+                        <th className="py-1.5 px-2.5 border-r border-[#1e293b] text-center w-16">Unsigned</th>
+                      )}
+                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] text-center w-14">Null</th>
+                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-28">Default</th>
+                      {supportsColumnComment(engine) && (
+                        <th className="py-1.5 px-2.5 border-r border-[#1e293b]">Comment</th>
+                      )}
                       <th className="py-1.5 px-2.5 text-center w-20">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {columns.map((col, idx) => {
-                      const isEditing = editingName === col.name;
-                      const d = isEditing ? editDraft! : toDraft(col);
+                    {colDrafts.map((d, idx) => {
+                      const colEnum = isPg ? enumTypes.find((et) => et.name.toLowerCase() === d.type.toLowerCase()) : undefined;
+                      const unsignedCandidate = isMysqlFamily(engine) && UNSIGNED_TYPE_RE.test(d.type.trim());
                       return (
-                        <tr key={col.name} className={`border-b border-[#1e293b]/50 transition-colors ${idx % 2 === 1 ? 'bg-white/[0.015]' : ''} hover:bg-[#141e33]`}>
-                          <td className="py-1.5 px-2.5 border-r border-[#1e293b] text-slate-500 text-center text-[11px]">{idx + 1}</td>
-                          <td className="py-1.5 px-2.5 border-r border-[#1e293b] text-slate-200 align-top">
-                            {isEditing ? (
-                              <div className="space-y-1.5">
-                                <div className="flex items-center gap-2">
-                                  {getColumnIcon(joinType(d.type, d.length), d.pk)}
-                                  <input
-                                    value={d.name}
-                                    onChange={(e) => setEditDraft({ ...d, name: e.target.value })}
-                                    autoFocus
-                                    className={INPUT_CLS}
-                                  />
-                                </div>
-                                {supportsColumnComment(engine) && (
-                                  <input
-                                    value={d.comment}
-                                    onChange={(e) => setEditDraft({ ...d, comment: e.target.value })}
-                                    placeholder="Comment (optional)…"
-                                    className={INPUT_CLS_SM}
-                                  />
-                                )}
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-2 font-semibold">
-                                {getColumnIcon(col.data_type, col.is_primary_key)}
-                                <span>{col.name}</span>
-                              </div>
-                            )}
+                        <tr
+                          key={d.id}
+                          onContextMenu={(e) => { e.preventDefault(); setColContextMenu({ x: e.clientX, y: e.clientY, index: idx }); }}
+                          className={`border-b border-[#1e293b]/50 transition-colors ${idx % 2 === 1 ? 'bg-white/[0.015]' : ''} ${
+                            d.removed ? 'opacity-40' : 'hover:bg-[#141e33]'
+                          }`}
+                        >
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] text-slate-500 text-center text-[11px]">{idx + 1}</td>
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] align-top">
+                            <div className="flex items-center gap-1.5">
+                              {getColumnIcon(colDraftFullType(d), d.pk)}
+                              <input
+                                value={d.name}
+                                onChange={(e) => updateColRow(d.id, { name: e.target.value })}
+                                disabled={d.removed}
+                                className={`${INPUT_CLS_SM} ${d.removed ? 'line-through' : ''}`}
+                              />
+                            </div>
                           </td>
-                          <td className="py-1.5 px-2.5 border-r border-[#1e293b] align-top">
-                            {isEditing ? (
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] align-top">
+                            <div className="relative flex items-center gap-1">
                               <select
                                 value={d.type}
-                                onChange={(e) => setEditDraft({ ...d, type: e.target.value })}
-                                className={INPUT_CLS}
+                                disabled={d.removed}
+                                onChange={(e) => {
+                                  // Picking a type re-splits the SELECTED label itself (not
+                                  // just storing it verbatim), because dataTypes.ts mixes bare
+                                  // labels ("int", meant to pair with the separate Length
+                                  // field) with labels that already embed a length ("varchar
+                                  // (255)", "decimal(10,2)"). Without this, switching from
+                                  // varchar(255) to decimal(10,2) while Length still held "255"
+                                  // produced "decimal(10,2)(255)" — invalid SQL. Also resets
+                                  // Unsigned, since it may not apply to the newly picked type.
+                                  const { type, length } = splitType(e.target.value);
+                                  updateColRow(d.id, { type, length, unsigned: false });
+                                }}
+                                className={INPUT_CLS_SM}
                               >
                                 {getGroupedTypeOptions(engine).map((group) => (
                                   <optgroup key={group.label} label={group.label}>
@@ -904,128 +1065,129 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
                                   <option value={d.type}>{d.type}</option>
                                 )}
                               </select>
+                              {colEnum && (
+                                <>
+                                  <button
+                                    onClick={() => { startEditEnum(colEnum); setEnumPopoverFor(colEnum.name); }}
+                                    title={`Edit enum type "${colEnum.name}"`}
+                                    className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-purple-400 shrink-0"
+                                  >
+                                    <List className="w-3 h-3" />
+                                  </button>
+                                  {enumPopoverFor === colEnum.name && editEnum && (
+                                    <div ref={enumPopoverRef} className="absolute z-40 top-full left-0 mt-1 w-64 bg-[#0a0f18] border border-[#1e293b] rounded-lg shadow-2xl p-2.5 space-y-2 normal-case">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider flex items-center gap-1">
+                                          <List className="w-3 h-3" /> Edit Enum Type
+                                        </span>
+                                        <button onClick={() => { setEnumPopoverFor(null); setEditingEnumName(null); setEditEnum(null); setError(null); }} className="text-slate-500 hover:text-slate-300">
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                      <div>
+                                        <label className="block text-[9px] text-slate-400 mb-1">Type Name</label>
+                                        <input type="text" value={editEnum.name} onChange={(e) => setEditEnum({ ...editEnum, name: e.target.value })} className={INPUT_CLS_SM} />
+                                      </div>
+                                      <div>
+                                        <label className="block text-[9px] text-slate-400 mb-1">Values</label>
+                                        <EnumValuesInput value={editEnum.valuesInner} onChange={(inner) => setEditEnum({ ...editEnum, valuesInner: inner })} className={INPUT_CLS_SM} />
+                                      </div>
+                                      <div className="text-[9px] text-amber-400/80 normal-case">
+                                        Removing or reordering values migrates every column using this type — you'll see which ones before anything runs.
+                                      </div>
+                                      <div className="flex justify-end gap-1.5">
+                                        <button onClick={() => { setEnumPopoverFor(null); setEditingEnumName(null); setEditEnum(null); setError(null); }}
+                                          className="px-2 py-1 rounded text-[10px] font-semibold bg-[#141e33] hover:bg-[#1e293b] text-slate-400">
+                                          Cancel
+                                        </button>
+                                        <button onClick={() => handleSaveEditEnum(colEnum)} disabled={running}
+                                          className="px-2 py-1 rounded text-[10px] font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1">
+                                          {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                                          Save
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] align-top">
+                            {isEnumType(d.type) ? (
+                              <EnumValuesInput
+                                value={d.length}
+                                onChange={(inner) => updateColRow(d.id, { length: inner })}
+                                className={INPUT_CLS_SM}
+                              />
                             ) : (
-                              <div className="relative flex items-center gap-1">
-                                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold lowercase ${typePillClass(col.data_type)}`}>
-                                  {splitType(col.data_type).type || '—'}
-                                </span>
-                                {(() => {
-                                  const colEnum = isPg ? enumTypes.find((et) => et.name.toLowerCase() === (col.data_type || '').toLowerCase()) : undefined;
-                                  if (!colEnum) return null;
-                                  return (
-                                    <>
-                                      <button
-                                        onClick={() => { startEditEnum(colEnum); setEnumPopoverFor(colEnum.name); }}
-                                        title={`Edit enum type "${colEnum.name}"`}
-                                        className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-purple-400"
-                                      >
-                                        <List className="w-3 h-3" />
-                                      </button>
-                                      {enumPopoverFor === colEnum.name && editEnum && (
-                                        <div ref={enumPopoverRef} className="absolute z-40 top-full left-0 mt-1 w-64 bg-[#0a0f18] border border-[#1e293b] rounded-lg shadow-2xl p-2.5 space-y-2 normal-case">
-                                          <div className="flex items-center justify-between">
-                                            <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider flex items-center gap-1">
-                                              <List className="w-3 h-3" /> Edit Enum Type
-                                            </span>
-                                            <button onClick={() => { setEnumPopoverFor(null); setEditingEnumName(null); setEditEnum(null); setError(null); }} className="text-slate-500 hover:text-slate-300">
-                                              <X className="w-3 h-3" />
-                                            </button>
-                                          </div>
-                                          <div>
-                                            <label className="block text-[9px] text-slate-400 mb-1">Type Name</label>
-                                            <input type="text" value={editEnum.name} onChange={(e) => setEditEnum({ ...editEnum, name: e.target.value })} className={INPUT_CLS_SM} />
-                                          </div>
-                                          <div>
-                                            <label className="block text-[9px] text-slate-400 mb-1">Values</label>
-                                            <EnumValuesInput value={editEnum.valuesInner} onChange={(inner) => setEditEnum({ ...editEnum, valuesInner: inner })} className={INPUT_CLS_SM} />
-                                          </div>
-                                          <div className="text-[9px] text-amber-400/80 normal-case">
-                                            Removing or reordering values migrates every column using this type — you'll see which ones before anything runs.
-                                          </div>
-                                          <div className="flex justify-end gap-1.5">
-                                            <button onClick={() => { setEnumPopoverFor(null); setEditingEnumName(null); setEditEnum(null); setError(null); }}
-                                              className="px-2 py-1 rounded text-[10px] font-semibold bg-[#141e33] hover:bg-[#1e293b] text-slate-400">
-                                              Cancel
-                                            </button>
-                                            <button onClick={() => handleSaveEditEnum(colEnum)} disabled={running}
-                                              className="px-2 py-1 rounded text-[10px] font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1">
-                                              {running ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-                                              Save
-                                            </button>
-                                          </div>
-                                        </div>
-                                      )}
-                                    </>
-                                  );
-                                })()}
-                              </div>
+                              <input
+                                value={d.length}
+                                disabled={d.removed}
+                                onChange={(e) => updateColRow(d.id, { length: e.target.value })}
+                                placeholder="—"
+                                className={INPUT_CLS_SM}
+                              />
                             )}
                           </td>
-                          <td className="py-1.5 px-2.5 border-r border-[#1e293b] align-top">
-                            {isEditing ? (
-                              isEnumType(d.type) ? (
-                                <EnumValuesInput
-                                  value={d.length}
-                                  onChange={(inner) => setEditDraft({ ...d, length: inner })}
-                                  className={INPUT_CLS}
-                                />
-                              ) : (
-                                <input
-                                  value={d.length}
-                                  onChange={(e) => setEditDraft({ ...d, length: e.target.value })}
-                                  placeholder="—"
-                                  className={INPUT_CLS}
-                                />
-                              )
-                            ) : (
-                              <span className="text-slate-400 text-[11px] font-mono">{splitType(col.data_type).length || '—'}</span>
-                            )}
+                          {isMysqlFamily(engine) && (
+                            <td className="py-1 px-2.5 border-r border-[#1e293b] text-center align-top">
+                              <input
+                                type="checkbox"
+                                checked={d.unsigned}
+                                disabled={d.removed || !unsignedCandidate}
+                                onChange={(e) => updateColRow(d.id, { unsigned: e.target.checked })}
+                                title={unsignedCandidate ? undefined : 'Only numeric types support UNSIGNED'}
+                              />
+                            </td>
+                          )}
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] text-center align-top">
+                            <input
+                              type="checkbox"
+                              checked={d.nullable}
+                              disabled={d.removed}
+                              onChange={(e) => updateColRow(d.id, { nullable: e.target.checked })}
+                            />
                           </td>
-                          <td className="py-1.5 px-2.5 border-r border-[#1e293b] text-center align-top">
-                            {isEditing ? (
-                              <div className="flex items-center justify-center gap-2">
-                                <label className="flex items-center gap-1 text-[9px] text-slate-300">
-                                  <input type="checkbox" checked={d.nullable} onChange={(e) => setEditDraft({ ...d, nullable: e.target.checked })} />
-                                  NULL
-                                </label>
-                                <label className="flex items-center gap-1 text-[9px] text-slate-300">
-                                  <input type="checkbox" checked={d.pk} onChange={(e) => setEditDraft({ ...d, pk: e.target.checked })} />
-                                  PK
-                                </label>
-                              </div>
-                            ) : (
-                              <div className="flex flex-wrap items-center justify-center gap-1">
-                                {col.is_primary_key ? (
-                                  <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 text-[9px] font-bold">PK</span>
-                                ) : (
-                                  <span className="text-slate-600 text-[10px]">—</span>
-                                )}
-                                {col.is_nullable !== false && (
-                                  <span className="px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-400 text-[9px] font-bold">NULL</span>
-                                )}
-                              </div>
-                            )}
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] align-top">
+                            <input
+                              value={d.defaultValue}
+                              disabled={d.removed}
+                              onChange={(e) => updateColRow(d.id, { defaultValue: e.target.value })}
+                              placeholder={d.origName ? '(unchanged)' : '—'}
+                              title={d.origName ? "Existing default isn't shown — leave blank to keep it, or type a new one to replace it" : undefined}
+                              className={INPUT_CLS_SM}
+                            />
                           </td>
-                          <td className="py-1.5 px-2.5 text-center align-top">
-                            {isEditing ? (
-                              <div className="flex items-center justify-center gap-1">
-                                <button onClick={() => handleSaveEdit(col)} disabled={running} className="p-1 rounded hover:bg-emerald-500/20 text-emerald-400 disabled:opacity-40" title="Save changes">
-                                  {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-                                </button>
-                                <button onClick={() => { setEditingName(null); setEditDraft(null); setError(null); }} className="p-1 rounded hover:bg-[#1e293b] text-slate-400" title="Cancel">
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex items-center justify-center gap-1">
-                                <button onClick={() => startEdit(col)} className="p-1 rounded hover:bg-[#1e293b] text-slate-400 hover:text-blue-400" title="Edit column">
-                                  <Pencil className="w-3.5 h-3.5" />
-                                </button>
-                                <button onClick={() => handleRemove(col)} disabled={running} className="p-1 rounded hover:bg-[#1e293b] text-slate-400 hover:text-red-400 disabled:opacity-40" title="Drop column">
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            )}
+                          {supportsColumnComment(engine) && (
+                            <td className="py-1 px-2.5 border-r border-[#1e293b] align-top">
+                              <input
+                                value={d.comment}
+                                disabled={d.removed}
+                                onChange={(e) => updateColRow(d.id, { comment: e.target.value })}
+                                placeholder={d.origName ? '(unchanged)' : 'Optional…'}
+                                className={INPUT_CLS_SM}
+                              />
+                            </td>
+                          )}
+                          <td className="py-1 px-2.5 text-center align-top">
+                            <div className="flex items-center justify-center gap-0.5">
+                              {isMysqlFamily(engine) && (
+                                <>
+                                  <button onClick={() => moveColRow(idx, -1)} disabled={idx === 0 || d.removed} title="Move up"
+                                    className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-blue-400 disabled:opacity-25 disabled:hover:text-slate-500">
+                                    <ArrowUp className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button onClick={() => moveColRow(idx, 1)} disabled={idx === colDrafts.length - 1 || d.removed} title="Move down"
+                                    className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-blue-400 disabled:opacity-25 disabled:hover:text-slate-500">
+                                    <ArrowDown className="w-3.5 h-3.5" />
+                                  </button>
+                                </>
+                              )}
+                              <button onClick={() => toggleRemoveColRow(d.id)} title={d.removed ? 'Undo remove' : 'Remove column'}
+                                className={`p-0.5 rounded hover:bg-[#1e293b] ${d.removed ? 'text-amber-400 hover:text-amber-300' : 'text-slate-500 hover:text-red-400'}`}>
+                                {d.removed ? <Undo2 className="w-3.5 h-3.5" /> : <Trash2 className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1034,79 +1196,58 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
                 </table>
               </div>
 
-              {/* Add Column */}
-              {isAddingColumn ? (
-                <div className="p-3 bg-[#0f172a] border border-blue-500/30 rounded-xl space-y-2.5">
-                  <div className="font-bold text-blue-400 flex items-center justify-between">
-                    <span className="flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5" /> Add New Column</span>
-                    <button onClick={() => { setIsAddingColumn(false); setError(null); }} className="text-slate-500 hover:text-slate-300">
-                      <X className="w-3.5 h-3.5" />
+              <button
+                onClick={addColRow}
+                className="w-full py-1.5 border border-dashed border-[#1e293b] hover:border-blue-500/50 hover:bg-[#0f172a] rounded-xl text-slate-400 hover:text-blue-400 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Column
+              </button>
+
+              {colsDirty && (
+                <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-amber-500/5 border border-amber-500/20">
+                  <span className="text-[11px] text-amber-300 font-semibold">Unsaved column changes</span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={discardColChanges} disabled={running}
+                      className="px-3 py-1 rounded-lg text-[11px] font-semibold bg-[#141e33] hover:bg-[#1e293b] text-slate-400 disabled:opacity-50">
+                      Discard
                     </button>
-                  </div>
-                  <div className="grid grid-cols-[1.3fr_1fr_0.7fr_auto_auto] gap-2 items-end">
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">Field Name</label>
-                      <input type="text" placeholder="e.g. status" value={newCol.name} onChange={(e) => setNewCol({ ...newCol, name: e.target.value })} autoFocus
-                        className={INPUT_CLS} />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">Type</label>
-                      <select value={newCol.type} onChange={(e) => setNewCol({ ...newCol, type: e.target.value })} className={INPUT_CLS}>
-                        {getGroupedTypeOptions(engine).map((group) => (
-                          <optgroup key={group.label} label={group.label}>
-                            {group.types.map((t) => (<option key={t.label} value={t.label}>{t.label}</option>))}
-                          </optgroup>
-                        ))}
-                        {!getTypeOptions(engine).includes(newCol.type) && (<option value={newCol.type}>{newCol.type}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">
-                        {isEnumType(newCol.type) ? 'Values' : 'Length'}
-                      </label>
-                      {isEnumType(newCol.type) ? (
-                        <EnumValuesInput
-                          value={newCol.length}
-                          onChange={(inner) => setNewCol({ ...newCol, length: inner })}
-                          className={INPUT_CLS}
-                        />
-                      ) : (
-                        <input type="text" placeholder="255" value={newCol.length} onChange={(e) => setNewCol({ ...newCol, length: e.target.value })}
-                          className={INPUT_CLS} />
-                      )}
-                    </div>
-                    <label className="flex items-center gap-1 text-[10px] text-slate-300 h-8">
-                      <input type="checkbox" checked={newCol.nullable} onChange={(e) => setNewCol({ ...newCol, nullable: e.target.checked })} />
-                      Null
-                    </label>
-                    <label className="flex items-center gap-1 text-[10px] text-slate-300 h-8">
-                      <input type="checkbox" checked={newCol.pk} onChange={(e) => setNewCol({ ...newCol, pk: e.target.checked })} />
-                      PK
-                    </label>
-                  </div>
-                  {supportsColumnComment(engine) && (
-                    <div>
-                      <label className="block text-[10px] text-slate-400 mb-1">Comment (optional)</label>
-                      <input type="text" placeholder="Describe this column…" value={newCol.comment} onChange={(e) => setNewCol({ ...newCol, comment: e.target.value })}
-                        className={INPUT_CLS} />
-                    </div>
-                  )}
-                  <div className="flex justify-end">
-                    <button onClick={handleAdd} disabled={running || !newCol.name.trim()}
-                      className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold rounded-lg flex items-center gap-1.5 transition-colors">
-                      {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                      Add Column
+                    <button onClick={handleSaveColumns} disabled={running}
+                      className="px-3 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white flex items-center gap-1.5">
+                      {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                      Save Changes
                     </button>
                   </div>
                 </div>
-              ) : (
-                <button
-                  onClick={() => { setIsAddingColumn(true); setError(null); setInfo(null); setNewCol({ name: '', type: 'varchar', length: '255', nullable: true, pk: false, comment: '' }); }}
-                  className="w-full py-1.5 border border-dashed border-[#1e293b] hover:border-blue-500/50 hover:bg-[#0f172a] rounded-xl text-slate-400 hover:text-blue-400 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+              )}
+
+              {colContextMenu && (
+                <div
+                  style={{ position: 'fixed', top: colContextMenu.y, left: colContextMenu.x }}
+                  onClick={(e) => e.stopPropagation()}
+                  className="z-50 bg-[#0a0f18] border border-[#1e293b] rounded-lg shadow-2xl py-1 min-w-[160px] text-[11px]"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  Add Field / Column
-                </button>
+                  <button onClick={addColRow} className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 text-slate-200">
+                    <Plus className="w-3.5 h-3.5 text-emerald-400" /> Add column
+                  </button>
+                  <button onClick={() => toggleRemoveColRow(colDrafts[colContextMenu.index].id)} className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 text-slate-200">
+                    <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                    {colDrafts[colContextMenu.index].removed ? 'Undo remove' : 'Remove column'}
+                  </button>
+                  {isMysqlFamily(engine) && (
+                    <>
+                      <div className="my-1 border-t border-[#1e293b]" />
+                      <button onClick={() => moveColRow(colContextMenu.index, -1)} disabled={colContextMenu.index === 0}
+                        className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 text-slate-200 disabled:opacity-40 disabled:hover:bg-transparent">
+                        <ArrowUp className="w-3.5 h-3.5 text-blue-400" /> Move up
+                      </button>
+                      <button onClick={() => moveColRow(colContextMenu.index, 1)} disabled={colContextMenu.index === colDrafts.length - 1}
+                        className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 text-slate-200 disabled:opacity-40 disabled:hover:bg-transparent">
+                        <ArrowDown className="w-3.5 h-3.5 text-blue-400" /> Move down
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           )}
