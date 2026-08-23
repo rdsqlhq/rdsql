@@ -63,7 +63,7 @@ export const GlobalSqlLog: React.FC = () => {
   const { sqlLogFullText, sqlLogColorCoding } = useSettingsStore();
   const [tab, setTab] = useState<LogTab>('log');
   const [search, setSearch] = useState('');
-  const [showSystem, setShowSystem] = useState(false);
+  const [showSystem, setShowSystem] = useState(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Connection isolation: when the focused tab belongs to a Redis connection,
@@ -84,9 +84,10 @@ export const GlobalSqlLog: React.FC = () => {
   );
 
   const errorLogs = useMemo(() => logs.filter((l) => l.status === 'error'), [logs]);
-  // Apply the system-query filter: when the checkbox is off, only user-facing
-  // queries (SQL editor + table grid) are shown. Errors always include every
-  // source so failures from backup/restore/maintenance aren't hidden.
+  // Apply the system-query filter: when the checkbox is unchecked, only
+  // user-facing queries (SQL editor + table grid) are shown. Errors always
+  // include every source so failures from backup/restore/maintenance aren't
+  // hidden.
   const sourceFiltered = useMemo(
     () => (showSystem || tab === 'errors' ? logs : logs.filter((l) => isUserFacingQuery(l.source))),
     [logs, showSystem, tab]
@@ -181,9 +182,9 @@ export const GlobalSqlLog: React.FC = () => {
             />
           </div>
 
-          {/* Show system queries (DDL / backup / restore / maintenance). Off by
-              default so the log stays focused on what the user ran in the editor
-              or edited in the grid. */}
+          {/* Show system queries (DDL / backup / restore / maintenance). On by
+              default so the log reflects everything rdSQL itself ran, not just
+              what the user typed in the editor or edited in the grid. */}
           <label
             className="flex items-center gap-1.5 text-[10.5px] text-slate-500 hover:text-slate-300 cursor-pointer select-none transition-colors"
             title="Include DDL, backup/restore, and maintenance queries in the log"
