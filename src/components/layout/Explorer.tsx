@@ -151,6 +151,26 @@ function getSizeColorClass(bytes?: number | null): string {
   return 'bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold';
 }
 
+/** Schema/database names the backend only includes when
+ *  `includeSystemSchemas` is on (see `fetch_schema_tree` in
+ *  src-tauri/src/commands/connection.rs). Used to keep the "auto-expand the
+ *  first group" convenience from landing on a system catalog. */
+const SYSTEM_SCHEMA_NAMES = new Set([
+  'information_schema',
+  'pg_catalog',
+  'pg_toast',
+  'mysql',
+  'performance_schema',
+  'sys',
+  'master',
+  'tempdb',
+  'model',
+  'msdb',
+]);
+function isSystemSchemaName(name: string): boolean {
+  return SYSTEM_SCHEMA_NAMES.has(name.toLowerCase());
+}
+
 /**
  * Position a context menu at the click point, but clamp it so it never
  * overflows the viewport. Measures the *actual* rendered menu height (via a ref)
@@ -806,10 +826,17 @@ export const Explorer: React.FC = () => {
       // autocomplete (and anything else) sees the same fresh data the Explorer
       // just loaded — no separate fetch needed.
       useConnectionStore.getState().setSchemaTreeForConn(conn.id, tree || []);
-      // Auto-expand the first schema/database group so tables are visible immediately.
-      if (tree && tree.length > 0) {
+      // Auto-expand the first schema/database group so tables are visible
+      // immediately. Skip system schemas (information_schema, pg_catalog,
+      // mysql, sys, …) even when "show system schemas" is on — they tend to
+      // sort first alphabetically (e.g. MySQL's `ORDER BY SCHEMA_NAME` puts
+      // `information_schema` ahead of most user db names), so picking
+      // `tree[0]` unconditionally would auto-expand a system schema instead
+      // of the user's actual database.
+      const firstUserGroup = tree?.find((g) => !isSystemSchemaName(g.name));
+      if (firstUserGroup) {
         setExpandedNodeKeys((prev) =>
-          new Set(prev).add(`${conn.id}-${tree[0].name}`)
+          new Set(prev).add(`${conn.id}-${firstUserGroup.name}`)
         );
         // Postgres nests schemas under a "Schemas" directory — expand that too,
         // otherwise the auto-expanded first schema stays hidden inside it.
@@ -2008,12 +2035,12 @@ export const Explorer: React.FC = () => {
                                 }`}
                               >
                                 {isGroupExpanded ? (
-                                  <ChevronDown className={`w-3.5 h-3.5 ${isActiveDb ? 'text-cyan-400' : 'text-slate-600'}`} />
+                                  <ChevronDown className={`w-3.5 h-3.5 shrink-0 ${isActiveDb ? 'text-cyan-400' : 'text-slate-600'}`} />
                                 ) : (
-                                  <ChevronRight className={`w-3.5 h-3.5 ${isActiveDb ? 'text-cyan-400' : 'text-slate-600'}`} />
+                                  <ChevronRight className={`w-3.5 h-3.5 shrink-0 ${isActiveDb ? 'text-cyan-400' : 'text-slate-600'}`} />
                                 )}
-                                <Database className={`w-3.5 h-3.5 ${isActiveDb ? 'text-cyan-400' : 'text-slate-500'}`} />
-                                <span className="truncate">{group.name}</span>
+                                <Database className={`w-3.5 h-3.5 shrink-0 ${isActiveDb ? 'text-cyan-400' : 'text-slate-500'}`} />
+                                <span className="truncate flex-1 min-w-0 text-left">{group.name}</span>
                                 {isActiveDb && (
                                   <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0" />
                                 )}
