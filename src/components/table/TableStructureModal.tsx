@@ -395,6 +395,21 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     setColContextMenu(null);
   };
 
+  /** Move a row directly to an arbitrary position — backs the editable
+   *  "Order" number in the # column (type a target position instead of
+   *  clicking Up/Down repeatedly). Same MySQL/MariaDB-only constraint as
+   *  `moveColRow` — it's just a different way to call the same reorder. */
+  const moveColRowTo = (fromIndex: number, toIndex: number) => {
+    setColDrafts((prev) => {
+      const clamped = Math.max(0, Math.min(prev.length - 1, toIndex));
+      if (clamped === fromIndex) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(clamped, 0, moved);
+      return next;
+    });
+  };
+
   const discardColChanges = () => {
     setColDrafts(columns.map(toColDraft));
     setError(null);
@@ -996,7 +1011,7 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
                 <table className="w-full text-left border-collapse">
                   <thead className="bg-[#0f172a] border-b border-[#1e293b] text-slate-400 uppercase text-[10px] tracking-wider">
                     <tr>
-                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-9 text-center">#</th>
+                      <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-12 text-center">#</th>
                       <th className="py-1.5 px-2.5 border-r border-[#1e293b]">Name</th>
                       <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-40">Type</th>
                       <th className="py-1.5 px-2.5 border-r border-[#1e293b] w-32">Length/Set</th>
@@ -1023,7 +1038,26 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
                             d.removed ? 'opacity-40' : 'hover:bg-[#141e33]'
                           }`}
                         >
-                          <td className="py-1 px-2.5 border-r border-[#1e293b] text-slate-500 text-center text-[11px]">{idx + 1}</td>
+                          <td className="py-1 px-2.5 border-r border-[#1e293b] text-slate-500 text-center text-[11px]">
+                            {isMysqlFamily(engine) ? (
+                              <input
+                                type="number"
+                                min={1}
+                                max={colDrafts.length}
+                                value={idx + 1}
+                                disabled={d.removed}
+                                title="Column order — type a position to move this column there"
+                                onChange={(e) => {
+                                  const target = parseInt(e.target.value, 10);
+                                  if (!Number.isFinite(target)) return;
+                                  moveColRowTo(idx, target - 1);
+                                }}
+                                className="w-11 bg-transparent text-center text-[11px] text-slate-400 focus:outline-none focus:bg-[#0f172a] focus:text-slate-100 rounded disabled:opacity-40"
+                              />
+                            ) : (
+                              idx + 1
+                            )}
+                          </td>
                           <td className="py-1 px-2.5 border-r border-[#1e293b] align-top">
                             <div className="flex items-center gap-1.5">
                               {getColumnIcon(colDraftFullType(d), d.pk)}
