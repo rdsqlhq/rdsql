@@ -503,6 +503,8 @@ export const Explorer: React.FC = () => {
   const setShowRowCounts = useSettingsStore((s) => s.setShowRowCounts);
   const showTableSizes = useSettingsStore((s) => s.showTableSizes);
   const setShowTableSizes = useSettingsStore((s) => s.setShowTableSizes);
+  const showTags = useSettingsStore((s) => s.showTags);
+  const setShowTags = useSettingsStore((s) => s.setShowTags);
   const cloudConfigured = useAuthStore((s) => s.cloudConfigured);
   const authStatus = useAuthStore((s) => s.status);
   const syncStatus = useSyncStore((s) => s.status);
@@ -1706,10 +1708,13 @@ export const Explorer: React.FC = () => {
             // "Other" bucket only makes sense once at least one connection is
             // grouped under a real tag. Storage connections participate in the
             // same check so a tag applied to an S3 connection still creates a
-            // folder.
+            // folder. `showTags` is the user's Show ▸ Tags toggle — off means
+            // render flat regardless of tagging, without touching the tags
+            // themselves.
             const hasAnyTagged =
-              filtered.some((c) => c.tagId) ||
-              storageConnections.some((c) => c.tagId);
+              showTags &&
+              (filtered.some((c) => c.tagId) ||
+                storageConnections.some((c) => c.tagId));
 
             const renderConnectionRow = (conn: DatabaseConnection) => {
               const isConnActive = conn.id === activeConnectionId;
@@ -3452,6 +3457,26 @@ export const Explorer: React.FC = () => {
                   )}
                   <span>Table Sizes</span>
                 </button>
+
+                {/* Tag folders. Off = every connection renders flat, as if
+                    untagged — the tags themselves (and each connection's
+                    assignment) are untouched, so re-enabling restores the
+                    same grouping. */}
+                <button
+                  onClick={() => {
+                    setShowTags(!showTags);
+                    close();
+                    setExplorerCtxMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showTags ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <TagIcon className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Tags</span>
+                </button>
               </>
             )}
           </ContextSubMenu>
@@ -4825,6 +4850,22 @@ export const Explorer: React.FC = () => {
                     <HardDrive className="w-3.5 h-3.5 text-slate-500" />
                   )}
                   <span>Table Sizes</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShowTags(!showTags);
+                    close();
+                    setFolderContextMenu(null);
+                  }}
+                  className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-slate-300"
+                >
+                  {showTags ? (
+                    <Check className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : (
+                    <TagIcon className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>Tags</span>
                 </button>
               </>
             )}

@@ -41,6 +41,10 @@ interface SettingsState {
   /** Show the size badge next to each table (and the schema/database
    *  header's aggregate size badge) in the Explorer tree. On by default. */
   showTableSizes: boolean;
+  /** Group connections into tag folders in the Explorer tree. On by default;
+   *  turning it off renders every connection flat (as if untagged) without
+   *  touching the tags themselves. */
+  showTags: boolean;
 
   /** Show the global SQL log panel at the bottom of the workspace. When off,
    *  the panel never renders (not even the collapsed strip) until re-enabled
@@ -72,6 +76,7 @@ interface SettingsState {
   setShowSystemSchemas: (v: boolean) => void;
   setShowRowCounts: (v: boolean) => void;
   setShowTableSizes: (v: boolean) => void;
+  setShowTags: (v: boolean) => void;
   setShowGlobalLogs: (v: boolean) => void;
   setSqlLogColorCoding: (v: boolean) => void;
   setSqlLogFullText: (v: boolean) => void;
@@ -93,6 +98,7 @@ export const useSettingsStore = create<SettingsState>()(
       showSystemSchemas: false,
       showRowCounts: true,
       showTableSizes: true,
+      showTags: true,
       showGlobalLogs: true,
       sqlLogColorCoding: true,
       sqlLogFullText: true,
@@ -105,6 +111,7 @@ export const useSettingsStore = create<SettingsState>()(
       setShowSystemSchemas: (v) => set({ showSystemSchemas: v }),
       setShowRowCounts: (v) => set({ showRowCounts: v }),
       setShowTableSizes: (v) => set({ showTableSizes: v }),
+      setShowTags: (v) => set({ showTags: v }),
       setShowGlobalLogs: (v) => set({ showGlobalLogs: v }),
       setSqlLogColorCoding: (v) => set({ sqlLogColorCoding: v }),
       setSqlLogFullText: (v) => set({ sqlLogFullText: v }),
