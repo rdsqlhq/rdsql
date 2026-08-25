@@ -1,14 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
 import type { editor as MonacoEditorNS } from 'monaco-editor';
-import { X, Check, AlignLeft, Braces, Eraser } from 'lucide-react';
+import { X, Check, AlignLeft, Braces, Eraser, ListChecks, Link2 } from 'lucide-react';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
+import { RelationCellInput } from './RelationCellInput';
+import type { RelationTarget } from './relationHelpers';
+import type { DatabaseConnection } from '../../core/domain/types';
 
 interface CellEditorModalProps {
   columnName: string;
   dataType?: string;
   /** True when the column is a JSON/object/array type — enables JSON tools. */
   isJson: boolean;
+  /** Postgres enum column's allowed labels — renders a dropdown of real
+   *  values (Navicat-style) instead of a free-text/Monaco box. */
+  enumValues?: string[] | null;
+  /** Foreign-key column → renders the same searchable autocomplete the
+   *  inline editor uses, instead of a free-text/Monaco box. Both this and
+   *  `relationConnection` must be present for the picker to render. */
+  relation?: RelationTarget;
+  relationConnection?: DatabaseConnection;
   /** Current cell value as a string (or null for SQL NULL). */
   value: string | null;
   onClose: () => void;
@@ -27,10 +38,15 @@ export const CellEditorModal: React.FC<CellEditorModalProps> = ({
   columnName,
   dataType,
   isJson,
+  enumValues,
+  relation,
+  relationConnection,
   value,
   onClose,
   onSave,
 }) => {
+  const isEnum = !!enumValues && enumValues.length > 0;
+  const isRelation = !isEnum && !!relation && !!relationConnection;
   const [draft, setDraft] = useState(value ?? '');
   const [error, setError] = useState<string | null>(null);
   // Always open in editable mode. Even when the cell is currently NULL we show
@@ -138,6 +154,10 @@ export const CellEditorModal: React.FC<CellEditorModalProps> = ({
           <div className="flex items-center gap-2">
             {isJson ? (
               <Braces className="w-4 h-4 text-amber-400" />
+            ) : isEnum ? (
+              <ListChecks className="w-4 h-4 text-purple-400" />
+            ) : isRelation ? (
+              <Link2 className="w-4 h-4 text-cyan-500" />
             ) : (
               <AlignLeft className="w-4 h-4 text-cyan-400" />
             )}
@@ -203,11 +223,50 @@ export const CellEditorModal: React.FC<CellEditorModalProps> = ({
           )}
         </div>
 
-        {/* Monaco Editor */}
+        {/* Editor — a native dropdown for enum/relation columns (Navicat-
+            style: pick from the actual allowed/related values instead of
+            typing free text a user could get wrong), Monaco for everything
+            else. Enter/Ctrl+Enter save and Escape cancels either way, to
+            match Monaco's own keybindings registered in handleMount. */}
         <div className="overflow-hidden relative h-[55vh] shrink-0">
           {isNull ? (
             <div className="flex items-center justify-center h-full text-slate-600 italic text-xs">
               Value is NULL — toggle NULL off to edit
+            </div>
+          ) : isEnum ? (
+            <div className="p-4">
+              <select
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') onClose();
+                  else if (e.key === 'Enter') { e.preventDefault(); handleSave(); }
+                }}
+                className="w-full h-9 box-border bg-[#0f172a] border border-blue-500 rounded px-2.5 text-sm text-slate-100 focus:outline-none font-mono"
+              >
+                <option value="">NULL</option>
+                {enumValues!.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </div>
+          ) : isRelation ? (
+            <div className="p-4">
+              <RelationCellInput
+                connection={relationConnection!}
+                targetTable={relation!.table}
+                targetSchemaName={relation!.schemaName}
+                targetPkColumn={relation!.pkColumn}
+                targetLabelColumn={relation!.labelColumn ?? null}
+                value={draft}
+                onChange={setDraft}
+                onSelect={setDraft}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') onClose();
+                  else if (e.key === 'Enter') { e.preventDefault(); handleSave(); }
+                }}
+                className="w-full h-9 box-border flex items-center bg-[#0f172a] border border-blue-500 rounded px-2.5 text-sm text-slate-100 font-mono"
+              />
             </div>
           ) : (
             <Editor

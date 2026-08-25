@@ -11,11 +11,18 @@ export interface Toast {
   actionLabel?: string;
   onAction?: () => void;
   createdAt: number;
+  /** Skip the auto-dismiss timer — for long-running operations (e.g. update
+   *  downloads) that must stay visible until explicitly updated/dismissed. */
+  persistent?: boolean;
 }
 
 interface ToastState {
   toasts: Toast[];
-  push: (toast: Omit<Toast, 'id' | 'createdAt'>) => void;
+  /** Returns the new toast's id so callers can later patch it via `update`. */
+  push: (toast: Omit<Toast, 'id' | 'createdAt'>) => string;
+  /** Patch an existing toast in place (e.g. to report progress) without
+   *  restarting its auto-dismiss timer or losing its position in the stack. */
+  update: (id: string, patch: Partial<Omit<Toast, 'id' | 'createdAt'>>) => void;
   dismiss: (id: string) => void;
 }
 
@@ -23,13 +30,19 @@ const MAX_TOASTS = 4;
 
 export const useToastStore = create<ToastState>((set) => ({
   toasts: [],
-  push: (toast) =>
+  push: (toast) => {
+    const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     set((state) => {
-      const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const next = [...state.toasts, { ...toast, id, createdAt: Date.now() }];
       // Keep the stack bounded — drop the oldest.
       return { toasts: next.slice(-MAX_TOASTS) };
-    }),
+    });
+    return id;
+  },
+  update: (id, patch) =>
+    set((state) => ({
+      toasts: state.toasts.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+    })),
   dismiss: (id) => set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
 }));
 

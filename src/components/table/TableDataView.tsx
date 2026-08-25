@@ -46,7 +46,9 @@ import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import { copyToClipboard } from '../../core/utils/clipboard';
 import { useToastStore } from '../../store/useToastStore';
 
-const PAGE_SIZE = 100;
+const DEFAULT_PAGE_SIZE = 100;
+const PAGE_SIZE_PRESETS = [25, 50, 100, 250, 500, 1000];
+const MAX_PAGE_SIZE = 100_000;
 
 type CellValue = string | number | boolean | null;
 type RowData = CellValue[];
@@ -157,9 +159,17 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
   const [selectedRows, setSelectedRows] = useState<Set<RowData>>(new Set());
   const [compareOpen, setCompareOpen] = useState(false);
 
+  // Rows-per-page — user-adjustable (preset dropdown + arbitrary custom
+  // number), not just the fixed 100 the backend used to hard-code.
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [customPageSizeOpen, setCustomPageSizeOpen] = useState(false);
+  const [pageSizeDraft, setPageSizeDraft] = useState(String(DEFAULT_PAGE_SIZE));
+
   // Grid sort + filter — controlled by this parent's toolbar so Filter sits
-  // next to Refresh in a single row (no separate grid toolbar).
-  const [gridSort, setGridSort] = useState<{ colIdx: number; dir: 'asc' | 'desc' } | null>(null);
+  // next to Refresh in a single row (no separate grid toolbar). Sort is keyed
+  // by column NAME (not the grid's internal visible-column index) so it can
+  // be turned into a server-side `ORDER BY` — see handleSortChange below.
+  const [gridSort, setGridSort] = useState<{ column: string; dir: 'asc' | 'desc' } | null>(null);
   const [gridFilters, setGridFilters] = useState<FilterCondition[]>([]);
   const [gridFilterOpen, setGridFilterOpen] = useState(false);
 
@@ -247,6 +257,8 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
     setNewRows([]);
     setApplyError(null);
     setCellContextMenu(null);
+    // A sort column from the previous table may not exist on this one.
+    setGridSort(null);
   }, [tabId, tab?.tableName]);
 
   // ---- Server-side pagination ------------------------------------------------
@@ -284,13 +296,23 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
     }
   }, [activeConn, engine, activeDb, tab?.tableName]);
 
+  // `overrides` lets a caller supply a page size / sort that hasn't landed in
+  // state yet (e.g. right when the user changes it) — reading only from
+  // `pageSize`/`gridSort` state would race the setState call and fetch with
+  // the stale value for one round-trip. Every other caller (Prev/Next,
+  // refresh, apply-changes) omits it and gets the current state as-is.
   const loadPage = React.useCallback(
-    async (page: number) => {
+    async (
+      page: number,
+      overrides?: { size?: number; sort?: { column: string; dir: 'asc' | 'desc' } | null }
+    ) => {
       if (!activeConn || !tab?.tableName) return;
       setLoadingPage(true);
       setPageError(null);
-      const offset = page * PAGE_SIZE;
-      const sql = paginatedSelectSql(engine, tab.tableName, activeDb, PAGE_SIZE, offset);
+      const size = overrides?.size ?? pageSize;
+      const sort = overrides && 'sort' in overrides ? overrides.sort : gridSort;
+      const offset = page * size;
+      const sql = paginatedSelectSql(engine, tab.tableName, activeDb, size, offset, sort);
       try {
         const res = await safeInvoke<QueryResultData>('execute_query', {
           request: { config: queryConfig, sql },
@@ -306,7 +328,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
         setLoadingPage(false);
       }
     },
-    [activeConn, engine, activeDb, tab?.tableName]
+    [activeConn, engine, activeDb, tab?.tableName, pageSize, gridSort]
   );
 
   // In-flight guards: track the table identity each query was last fired for
@@ -523,7 +545,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
   );
 
   const totalRows = totalCount;
-  const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
   const pageRows = filteredRows;
 
   // Virtualization: compute the visible row window from the scroll position.
@@ -542,6 +564,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
         is_primary_key: pkColumns.includes(c.name),
         is_foreign_key: fkColumns.has(c.name) || fkMap.has(c.name),
         is_indexed: indexedColumns.has(c.name),
+        enum_values: c.enum_values,
       })),
     [result?.columns, requiredColumns, pkColumns, fkColumns, fkMap, indexedColumns]
   );
@@ -611,6 +634,45 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
     setPendingDeletes(new Set());
     setNewRows([]);
     setApplyError(null);
+  };
+
+  // Sorting is server-side: each page only ever holds `pageSize` rows of the
+  // table, so sorting just the loaded page client-side would silently sort
+  // the wrong thing (a 100-row slice, not the table). A header click instead
+  // resets to page 0 and re-fetches with `ORDER BY <column> <dir>`.
+  //
+  // Resetting an already-0 `currentPage` to 0 is a no-op state update, so the
+  // page-change effect below (keyed on `currentPage`) won't fire — in that
+  // case we fetch directly. Otherwise setting the page is enough: the effect
+  // picks it up and reads the just-updated sort/size off state itself.
+  const handleSortChange = (sort: { column: string; dir: 'asc' | 'desc' } | null) => {
+    setGridSort(sort);
+    if (currentPage === 0) {
+      loadPage(0, { sort });
+    } else {
+      setCurrentPage(0);
+    }
+  };
+
+  const handlePageSizeChange = (size: number) => {
+    const clamped = Math.max(1, Math.min(MAX_PAGE_SIZE, Math.floor(size) || DEFAULT_PAGE_SIZE));
+    setPageSize(clamped);
+    setPageSizeDraft(String(clamped));
+    if (currentPage === 0) {
+      loadPage(0, { size: clamped });
+    } else {
+      setCurrentPage(0);
+    }
+  };
+
+  const commitCustomPageSize = () => {
+    const n = parseInt(pageSizeDraft, 10);
+    if (Number.isFinite(n) && n > 0) {
+      handlePageSizeChange(n);
+    } else {
+      setPageSizeDraft(String(pageSize));
+    }
+    setCustomPageSizeOpen(false);
   };
 
   const handleCellContextMenu = (e: React.MouseEvent, row: RowData, col: string) => {
@@ -1002,9 +1064,9 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
           {gridSort && result && (
             <span className="inline-flex items-center gap-0.5 text-cyan-300 font-mono text-[10px] shrink-0">
               {gridSort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
-              {result.columns[gridSort.colIdx]?.name}
+              {gridSort.column}
               <button
-                onClick={() => setGridSort(null)}
+                onClick={() => handleSortChange(null)}
                 className="text-slate-500 hover:text-red-400"
                 title="Clear sort"
               >
@@ -1082,7 +1144,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
         pageRows.forEach((row, idx) => {
           if (selectedRows.has(row)) {
             compareRows.push(row);
-            compareRowNumbers.push(currentPage * PAGE_SIZE + idx + 1);
+            compareRowNumbers.push(currentPage * pageSize + idx + 1);
           }
         });
         return (
@@ -1131,7 +1193,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
             const e = parseDbError(error);
             const offendingSql =
               e.sql ||
-              paginatedSelectSql(engine, tab.tableName || '', activeDb, PAGE_SIZE, currentPage * PAGE_SIZE);
+              paginatedSelectSql(engine, tab.tableName || '', activeDb, pageSize, currentPage * pageSize, gridSort);
             return (
               <div className="m-4 rounded-xl border border-red-500/30 bg-red-950/20 overflow-hidden">
                 <div className="flex items-center gap-2 px-4 py-2.5 bg-red-950/40 border-b border-red-500/30 text-red-200">
@@ -1309,9 +1371,9 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
             onOpenModalEditor={(row, colName, dataType) => setModalEditCell({ row, col: colName, dataType })}
             onToggleRowDelete={toggleRowDelete}
             onCellContextMenu={handleCellContextMenu}
-            rowNumberOffset={currentPage * PAGE_SIZE}
+            rowNumberOffset={currentPage * pageSize}
             sortState={gridSort}
-            onSortChange={setGridSort}
+            onSortChange={handleSortChange}
             filterConditions={gridFilters}
             onFilterChange={setGridFilters}
             filterOpen={gridFilterOpen}
@@ -1326,11 +1388,54 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
       {/* Pagination Footer */}
       {result && (
         <div className="h-9 px-3 border-t border-[#1e293b] bg-[#0a0f18] flex items-center justify-between text-xs select-none shrink-0">
-          <span className="text-slate-400 font-mono text-[11px]">
-            {loadingPage
-              ? 'Loading page…'
-              : `${totalRows.toLocaleString()} row${totalRows === 1 ? '' : 's'} total • Page ${currentPage + 1} of ${totalPages} (${PAGE_SIZE}/page)`}
-          </span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-slate-400 font-mono text-[11px] truncate">
+              {loadingPage
+                ? 'Loading page…'
+                : `${totalRows.toLocaleString()} row${totalRows === 1 ? '' : 's'} total • Page ${currentPage + 1} of ${totalPages}`}
+            </span>
+            <div className="flex items-center gap-1 shrink-0">
+              <select
+                value={PAGE_SIZE_PRESETS.includes(pageSize) ? String(pageSize) : 'custom'}
+                onChange={(e) => {
+                  if (e.target.value === 'custom') {
+                    setPageSizeDraft(String(pageSize));
+                    setCustomPageSizeOpen(true);
+                  } else {
+                    setCustomPageSizeOpen(false);
+                    handlePageSizeChange(Number(e.target.value));
+                  }
+                }}
+                disabled={executing || loadingPage}
+                className="bg-[#0f172a] border border-[#1e293b] rounded px-1 py-0.5 text-[11px] text-slate-300 font-mono focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                title="Rows per page"
+              >
+                {PAGE_SIZE_PRESETS.map((n) => (
+                  <option key={n} value={n}>{n}/page</option>
+                ))}
+                <option value="custom">Custom…</option>
+              </select>
+              {customPageSizeOpen && (
+                <input
+                  type="number"
+                  min={1}
+                  max={MAX_PAGE_SIZE}
+                  value={pageSizeDraft}
+                  autoFocus
+                  onChange={(e) => setPageSizeDraft(e.target.value)}
+                  onBlur={commitCustomPageSize}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitCustomPageSize();
+                    if (e.key === 'Escape') {
+                      setPageSizeDraft(String(pageSize));
+                      setCustomPageSizeOpen(false);
+                    }
+                  }}
+                  className="w-16 bg-[#0f172a] border border-cyan-500/50 rounded px-1.5 py-0.5 text-[11px] text-slate-200 font-mono focus:outline-none"
+                />
+              )}
+            </div>
+          </div>
 
           <div className="flex items-center gap-2 text-xs">
             <button
@@ -1487,6 +1592,9 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
           columnName={modalEditCell.col}
           dataType={modalEditCell.dataType}
           isJson={isJsonType(modalEditCell.dataType)}
+          enumValues={gridColumns.find((c) => c.name === modalEditCell.col)?.enum_values}
+          relation={fkMap.get(modalEditCell.col)}
+          relationConnection={queryConfig ?? activeConn ?? undefined}
           value={
             (() => {
               const edits = pendingUpdates.get(modalEditCell.row);
@@ -1507,6 +1615,9 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
           columnName={newRowModal.col}
           dataType={newRowModal.dataType}
           isJson={isJsonType(newRowModal.dataType)}
+          enumValues={gridColumns.find((c) => c.name === newRowModal.col)?.enum_values}
+          relation={fkMap.get(newRowModal.col)}
+          relationConnection={queryConfig ?? activeConn ?? undefined}
           value={
             (() => {
               const nr = newRows.find((r) => r.tempId === newRowModal.tempId);

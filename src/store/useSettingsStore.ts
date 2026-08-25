@@ -33,6 +33,19 @@ interface SettingsState {
    *  immediately on next tree refresh. */
   showSystemSchemas: boolean;
 
+  /** Show the row-count badge next to each table in the Explorer tree (and
+   *  fold into the schema/database header's aggregate tooltip). On by
+   *  default — same visibility as before this was made toggleable; turning
+   *  it off trims a bit of width/noise from a tree with many tables. */
+  showRowCounts: boolean;
+  /** Show the size badge next to each table (and the schema/database
+   *  header's aggregate size badge) in the Explorer tree. On by default. */
+  showTableSizes: boolean;
+  /** Group connections into tag folders in the Explorer tree. On by default;
+   *  turning it off renders every connection flat (as if untagged) without
+   *  touching the tags themselves. */
+  showTags: boolean;
+
   /** Show the global SQL log panel at the bottom of the workspace. When off,
    *  the panel never renders (not even the collapsed strip) until re-enabled
    *  from Settings. The per-session collapse toggle in the workspace store is
@@ -61,6 +74,9 @@ interface SettingsState {
   setExecTimeoutSec: (n: number) => void;
   setS3PreviewMaxBytes: (n: number) => void;
   setShowSystemSchemas: (v: boolean) => void;
+  setShowRowCounts: (v: boolean) => void;
+  setShowTableSizes: (v: boolean) => void;
+  setShowTags: (v: boolean) => void;
   setShowGlobalLogs: (v: boolean) => void;
   setSqlLogColorCoding: (v: boolean) => void;
   setSqlLogFullText: (v: boolean) => void;
@@ -80,6 +96,9 @@ export const useSettingsStore = create<SettingsState>()(
       execTimeoutSec: 30,
       s3PreviewMaxBytes: FIVE_MB,
       showSystemSchemas: false,
+      showRowCounts: true,
+      showTableSizes: true,
+      showTags: true,
       showGlobalLogs: true,
       sqlLogColorCoding: true,
       sqlLogFullText: true,
@@ -90,6 +109,9 @@ export const useSettingsStore = create<SettingsState>()(
       setExecTimeoutSec: (n) => set({ execTimeoutSec: clampPositive(n, 30) }),
       setS3PreviewMaxBytes: (n) => set({ s3PreviewMaxBytes: clampPositive(n, FIVE_MB) }),
       setShowSystemSchemas: (v) => set({ showSystemSchemas: v }),
+      setShowRowCounts: (v) => set({ showRowCounts: v }),
+      setShowTableSizes: (v) => set({ showTableSizes: v }),
+      setShowTags: (v) => set({ showTags: v }),
       setShowGlobalLogs: (v) => set({ showGlobalLogs: v }),
       setSqlLogColorCoding: (v) => set({ sqlLogColorCoding: v }),
       setSqlLogFullText: (v) => set({ sqlLogFullText: v }),

@@ -63,13 +63,17 @@ export function paginatedSelectSql(
   tableName: string,
   schemaName: string | undefined,
   limit: number,
-  offset: number
+  offset: number,
+  orderBy?: { column: string; dir: 'asc' | 'desc' } | null
 ): string {
   const qt = qualifiedTable(engine, tableName, schemaName);
+  const orderClause = orderBy
+    ? `ORDER BY ${quoteIdent(engine, orderBy.column)} ${orderBy.dir === 'desc' ? 'DESC' : 'ASC'}`
+    : null;
   if (isMssqlFamily(engine)) {
-    return `SELECT * FROM ${qt} ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY;`;
+    return `SELECT * FROM ${qt} ${orderClause ?? 'ORDER BY (SELECT NULL)'} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY;`;
   }
-  return `SELECT * FROM ${qt} LIMIT ${limit} OFFSET ${offset};`;
+  return `SELECT * FROM ${qt}${orderClause ? ` ${orderClause}` : ''} LIMIT ${limit} OFFSET ${offset};`;
 }
 
 /**

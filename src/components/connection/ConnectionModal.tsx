@@ -134,7 +134,7 @@ const NavItem: React.FC<{
 );
 
 export const ConnectionModal: React.FC = () => {
-  const { isConnectionModalOpen, setConnectionModalOpen, saveConnection, editingConnection, setServerVersion } = useConnectionStore();
+  const { isConnectionModalOpen, setConnectionModalOpen, saveConnection, editingConnection, newConnectionTagId, setServerVersion } = useConnectionStore();
   const { tags } = useTagStore();
   useEscapeToClose(isConnectionModalOpen ? () => setConnectionModalOpen(false) : null);
 
@@ -269,7 +269,7 @@ export const ConnectionModal: React.FC = () => {
       setFilePath('');
       setUrlString('');
       setSslMode('');
-      setTagId(null);
+      setTagId(newConnectionTagId ?? null);
       setShowSystemSchemas(globalShowSystemSchemas);
       setCfAccountId('');
       setCfApiToken('');
@@ -302,7 +302,7 @@ export const ConnectionModal: React.FC = () => {
       setS3ForcePathStyle(getPreset('minio').forcePathStyle);
       setS3PathPrefix('rdsql/');
     }
-  }, [isConnectionModalOpen, editingConnection]);
+  }, [isConnectionModalOpen, editingConnection, newConnectionTagId]);
 
   if (!isConnectionModalOpen) return null;
 

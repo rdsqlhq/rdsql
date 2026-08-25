@@ -577,7 +577,32 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     COALESCE(pg_total_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)), 0)::bigint AS size_bytes,
                     GREATEST(0, COALESCE(c_est.reltuples::bigint, 0)) AS row_count,
                     col.column_name,
-                    col.data_type,
+                    -- information_schema.columns.data_type is USELESS for
+                    -- enum/array columns — Postgres reports the literal
+                    -- string 'USER-DEFINED' for a `CREATE TYPE ... AS ENUM`
+                    -- column and 'ARRAY' for any array column, never the
+                    -- real type name. The Table Structure modal was showing
+                    -- (and trying to save) that literal placeholder as the
+                    -- column's type. The real name lives in udt_name —
+                    -- Postgres prefixes an array's udt_name with '_' (e.g.
+                    -- '_int4' for int4[]), so strip that and append '[]'.
+                    CASE
+                        WHEN col.data_type = 'ARRAY' THEN substring(col.udt_name from 2) || '[]'
+                        WHEN col.data_type = 'USER-DEFINED' THEN col.udt_name
+                        -- Bare `information_schema.columns.data_type` drops the
+                        -- length/precision entirely (e.g. a `varchar(255)`
+                        -- column reports just 'character varying') — the Table
+                        -- Structure grid's Length/Set column showed blank for
+                        -- every existing Postgres varchar/numeric column even
+                        -- though the DB has a real value. Both fields are
+                        -- already available on the same joined `col` row, no
+                        -- extra join needed.
+                        WHEN col.character_maximum_length IS NOT NULL
+                            THEN col.data_type || '(' || col.character_maximum_length::text || ')'
+                        WHEN col.data_type IN ('numeric', 'decimal') AND col.numeric_precision IS NOT NULL
+                            THEN col.data_type || '(' || col.numeric_precision::text || ',' || COALESCE(col.numeric_scale, 0)::text || ')'
+                        ELSE col.data_type
+                    END AS data_type,
                     CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk,
                     col.is_nullable,
                     col.column_default,

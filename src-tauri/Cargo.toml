@@ -20,7 +20,13 @@ serde_json = "1.0"
 tokio = { version = "1.38", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 duckdb = { version = "1.105", features = ["bundled", "chrono"] }
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+# NUMERIC/DECIMAL cell decoding for Postgres query results (commands::query) —
+# Postgres sends NUMERIC in a packed base-10000 binary form, not text, so
+# there's no way to read it as a string without a real decimal type. The
+# postgres FromSql/ToSql impl for Decimal is a rust_decimal feature (not a
+# tokio-postgres/postgres-types one).
+rust_decimal = { version = "1", features = ["db-postgres"] }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls"] }
 # SQL Server (TDS protocol). rustls to match the mysql_async/reqwest convention
 # elsewhere in this crate — avoids an OpenSSL/native-tls system dependency.
@@ -66,6 +72,15 @@ base64 = "0.22"
 # tokio-rustls-comp matches the rustls convention already used by
 # mysql_async/reqwest elsewhere in this crate — no native-tls system dep.
 redis = { version = "1.5", features = ["tokio-comp", "tokio-rustls-comp"] }
+
+# Raw `Bytes` type + the `Sink`/`Stream` combinator traits
+# (`SinkExt`/`TryStreamExt`) used by `commands::migrate` to stream rows into
+# a Postgres `COPY ... FROM STDIN` sink and out of a Postgres `query_raw`
+# source cursor. Both are already pulled in transitively by tokio-postgres;
+# declared directly here (default features — no reason to trim them) because
+# we call their APIs ourselves.
+bytes = "1"
+futures-util = "0.3"
 
 # SSH tunnel / jump-server support (`commands::ssh_tunnel`), used by every
 # networked engine (Postgres, MySQL, SQL Server, Redis). Pure-Rust async SSH

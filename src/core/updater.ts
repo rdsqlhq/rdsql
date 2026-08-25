@@ -125,7 +125,7 @@ export async function installUpdate(
  * Help ▸ Check for Updates menu passes `silent: false` to always get feedback.
  */
 export async function checkForUpdateAndNotify(silent: boolean): Promise<void> {
-  const push = useToastStore.getState().push;
+  const { push, update: updateToast } = useToastStore.getState();
   const { result, update } = await checkForUpdate();
 
   if (result.status === 'available' && update) {
@@ -135,16 +135,30 @@ export async function checkForUpdateAndNotify(silent: boolean): Promise<void> {
       message: 'Download and restart to install the new version.',
       actionLabel: 'Install now',
       onAction: () => {
-        push({
+        // Persistent: a real download takes far longer than the default 6s
+        // auto-dismiss, and must stay visible (with live progress) the whole
+        // time — otherwise it looks like the update silently died.
+        const toastId = push({
           severity: 'info',
           title: 'Downloading update…',
           message: 'rdSQL will restart automatically when it finishes.',
+          persistent: true,
         });
-        installUpdate(update).catch((err) => {
-          push({
+        installUpdate(update, (percent) => {
+          updateToast(toastId, {
+            message:
+              percent != null
+                ? `${percent}% downloaded — rdSQL will restart automatically when it finishes.`
+                : 'Downloading… rdSQL will restart automatically when it finishes.',
+          });
+        }).catch((err) => {
+          // Success has no visible follow-up: relaunch() tears the app down
+          // before this toast could render anyway.
+          updateToast(toastId, {
             severity: 'error',
             title: 'Update failed',
             message: err?.message || String(err),
+            persistent: false,
           });
         });
       },

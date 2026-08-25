@@ -54,6 +54,9 @@ export interface DataGridColumn {
   is_foreign_key?: boolean;
   /** Part of a secondary index → renders an index icon in the header. */
   is_indexed?: boolean;
+  /** Postgres enum column's allowed labels — renders a dropdown of real
+   *  values (inline + the full-screen modal) instead of a free-text box. */
+  enum_values?: string[] | null;
 }
 
 export interface DataGridProps {
@@ -102,9 +105,11 @@ export interface DataGridProps {
   rowNumberOffset?: number;
 
   // ── Sort + filter (controlled from the parent toolbar). ───────────────────
-  /** Active sort. `null` = unsorted. Header clicks call `onSortChange`. */
-  sortState?: { colIdx: number; dir: 'asc' | 'desc' } | null;
-  onSortChange?: (s: { colIdx: number; dir: 'asc' | 'desc' } | null) => void;
+  /** Active sort, keyed by column NAME (not index — indices shift with hidden
+   *  columns, and a name is what a parent needs to build a server-side
+   *  `ORDER BY`). `null` = unsorted. Header clicks call `onSortChange`. */
+  sortState?: { column: string; dir: 'asc' | 'desc' } | null;
+  onSortChange?: (s: { column: string; dir: 'asc' | 'desc' } | null) => void;
   /** Active filter conditions. AND-combined. */
   filterConditions?: FilterCondition[];
   onFilterChange?: (c: FilterCondition[]) => void;
@@ -123,13 +128,30 @@ export interface DataGridProps {
   columnStorageKey?: string;
 }
 
-// ─── Virtualization constants ───────────────────────────────────────────────
+// ─── Layout constants ───────────────────────────────────────────────────────
+//
+// The grid body is div/flexbox, NOT a <table>. A native <table> re-runs its
+// (expensive) layout algorithm whenever rows are added/removed — which
+// virtualization does constantly — and that recalculation is what showed up
+// as a freeze/stutter on fast scroll in BOTH directions (horizontal scroll
+// never touched React state at all, so a table-layout cost was the only thing
+// that could explain it happening there too). Div rows are absolutely
+// positioned (via `top`, computed from the row index — see ROW_HEIGHT below)
+// so adding/removing one never affects any sibling's layout, and plain
+// fixed-width flex cells never invoke a table layout pass at all.
 
-const ROW_HEIGHT = 30; // px — matches py-1.5 + text-xs line height
+const ROW_HEIGHT = 30; // px — matches the old py-1.5 + text-xs line height
+const HEADER_HEIGHT = 33; // px — matches the old thead (py-2 + text)
 // Generous overscan so fast scrolling reveals already-rendered rows instead
-// of the bare spacer area (which paints as the dark container background and
-// looks like a blank/black flash before the next frame catches up).
+// of bare (unrendered) space before the next frame catches up.
 const OVERSCAN = 20;
+
+// Fixed-width gutter columns (px equivalents of the old w-9/w-10/w-8 classes).
+const SELECT_COL_W = 36;
+const DELETE_COL_W = 40;
+const ROWNUM_COL_W = 40;
+const COLTOGGLE_COL_W = 32;
+const EMPTY_STATE_H = 96;
 
 // ─── Cell content (read mode) ───────────────────────────────────────────────
 
@@ -155,13 +177,24 @@ const CellContent: React.FC<{
     return (
       <>
         <Braces className="w-3 h-3 text-amber-400 shrink-0" />
-        <span className="truncate">{String(value)}</span>
+        {/* JSON/JSONB/array columns arrive from the backend as parsed JS
+            objects/arrays, not strings — String(obj) would render
+            "[object Object]". cellToText JSON.stringifies objects and passes
+            primitives through untouched. */}
+        <span className="truncate">{cellToText(value)}</span>
       </>
     );
   }
   return <span className="truncate">{String(value)}</span>;
 });
 CellContent.displayName = 'CellContent';
+
+/** A column has real enum labels (currently only Postgres `CREATE TYPE ...
+ *  AS ENUM` columns populate this) → editor kind is 'enum' regardless of the
+ *  raw `data_type` string, so it gets a dropdown of real values instead of
+ *  whatever `getEditorKind` would infer from the type name alone. */
+const resolveEditorKind = (col: Pick<DataGridColumn, 'data_type' | 'enum_values'>): ReturnType<typeof getEditorKind> =>
+  col.enum_values && col.enum_values.length > 0 ? 'enum' : getEditorKind(col.data_type);
 
 // ─── DataGrid ───────────────────────────────────────────────────────────────
 
@@ -212,7 +245,6 @@ export const DataGrid: React.FC<DataGridProps> = ({
     draftRef.current = v;
     setDraftState(v);
   }, []);
-  const inputRef = useRef<HTMLDivElement>(null);
   // Track which new row should auto-focus its first cell. Set by the parent
   // via `focusNewRowId` prop when Insert Row is clicked.
   const focusNewRowId = newRows && newRows.length > 0 ? newRows[newRows.length - 1].tempId : null;
@@ -229,7 +261,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // the edit. Without the Flatpickr exclusion, clicking a date in the popup
   // would commit the stale draft before the picker's onChange fired, so the
   // selected date never landed in the cell.
-  const editingCellRef = useRef<HTMLTableCellElement | null>(null);
+  const editingCellRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!editingCell) return;
     const handler = (e: MouseEvent) => {
@@ -256,10 +288,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   // ── Scroll tracking (rAF-throttled) ───────────────────────────────────────
   // Only setScrollTop on scroll — viewportH changes only on resize (handled
-  // by the ResizeObserver below). Setting both per frame caused a double
-  // re-render + needless re-slice on every animation frame, which made fast
-  // scrolling feel janky and show unrendered (blank) spacer areas while the
-  // next frame's visible window caught up.
+  // by the ResizeObserver below).
   const rafRef = useRef<number | null>(null);
   const onScroll = useCallback(() => {
     if (rafRef.current != null) return;
@@ -319,7 +348,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // The parent toolbar owns the Filter button + drawer toggle. When the parent
   // passes controlled props, we use them; otherwise we fall back to internal
   // state so the grid still works standalone.
-  const [internalSort, setInternalSort] = useState<{ colIdx: number; dir: 'asc' | 'desc' } | null>(null);
+  const [internalSort, setInternalSort] = useState<{ column: string; dir: 'asc' | 'desc' } | null>(null);
   const [internalFilters, setInternalFilters] = useState<FilterCondition[]>([]);
   const [internalFilterOpen, setInternalFilterOpen] = useState(false);
 
@@ -332,12 +361,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
 
   // Column metadata for the filter drawer (name + editor kind + raw type).
   const filterColumns: FilterColumn[] = useMemo(
-    () => columns.map((c) => ({ name: c.name, kind: getEditorKind(c.data_type), data_type: c.data_type })),
+    () => columns.map((c) => ({ name: c.name, kind: resolveEditorKind(c), data_type: c.data_type })),
     [columns],
   );
   const columnKinds = useMemo(() => {
     const m = new Map<string, ReturnType<typeof getEditorKind>>();
-    columns.forEach((c) => m.set(c.name, getEditorKind(c.data_type)));
+    columns.forEach((c) => m.set(c.name, resolveEditorKind(c)));
     return m;
   }, [columns]);
   const columnIndex = useMemo(() => {
@@ -371,22 +400,20 @@ export const DataGrid: React.FC<DataGridProps> = ({
       out = applyFilters(out, filterConditions, columnKinds, columnIndex);
     }
     if (sortState) {
-      const { colIdx, dir } = sortState;
-      // colIdx is the visible-column index; map to the raw row index so
-      // hidden columns don't shift what we sort by.
-      const colName = visibleColumns[colIdx]?.name;
-      const rawIdx = colName ? (columnIndex.get(colName) ?? colIdx) : colIdx;
-      const sorted = [...out].sort((a, b) => compareCells(a[rawIdx], b[rawIdx]));
-      out = dir === 'desc' ? sorted.reverse() : sorted;
+      const rawIdx = columnIndex.get(sortState.column);
+      if (rawIdx !== undefined) {
+        const sorted = [...out].sort((a, b) => compareCells(a[rawIdx], b[rawIdx]));
+        out = sortState.dir === 'desc' ? sorted.reverse() : sorted;
+      }
     }
     return out;
-  }, [rows, filterConditions, columnKinds, columnIndex, sortState, visibleColumns]);
+  }, [rows, filterConditions, columnKinds, columnIndex, sortState]);
 
   const toggleSort = useCallback(
-    (colIdx: number) => {
+    (column: string) => {
       const next = (() => {
-        if (!sortState || sortState.colIdx !== colIdx) return { colIdx, dir: 'asc' as const };
-        if (sortState.dir === 'asc') return { colIdx, dir: 'desc' as const };
+        if (!sortState || sortState.column !== column) return { column, dir: 'asc' as const };
+        if (sortState.dir === 'asc') return { column, dir: 'desc' as const };
         return null;
       })();
       setSortState(next);
@@ -421,8 +448,6 @@ export const DataGrid: React.FC<DataGridProps> = ({
   const vCount = Math.ceil(viewportH / ROW_HEIGHT) + OVERSCAN * 2;
   const vEnd = Math.min(displayRows.length, vStart + vCount);
   const vRows = displayRows.slice(vStart, vEnd);
-  const spacerTop = vStart * ROW_HEIGHT;
-  const spacerBottom = Math.max(0, (displayRows.length - vEnd) * ROW_HEIGHT);
 
   const hasSelection = !!selectedRows && !!onToggleSelectRow;
   const hasDelete = !!onToggleRowDelete && editable;
@@ -431,6 +456,18 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // `measureColumn` powers double-click-to-autofit: it measures the natural
   // text width of the header + visible body cells (via canvas, independent of
   // the column's current width) so the column can shrink OR grow to fit.
+  //
+  // Reads `vRows` via a ref instead of closing over it directly. `vRows` is a
+  // fresh slice on every vertical-scroll-triggered render, so having it in
+  // this useCallback's deps gave `measureColumn` a new identity on every
+  // scroll frame — which cascaded into the auto-fit-lock effect below
+  // (`measureColumn` is one of its deps) tearing down and re-running every
+  // frame too, even though it's a no-op after the first lock. The ref keeps
+  // `measureColumn` stable across scroll while still reading fresh rows
+  // whenever it's actually called (double-click-to-autofit, or the one-time
+  // lock).
+  const vRowsRef = useRef(vRows);
+  vRowsRef.current = vRows;
   const measureColumn = useCallback(
     (name: string): number | null => {
       const rawIdx = columnIndex.get(name);
@@ -443,20 +480,21 @@ export const DataGrid: React.FC<DataGridProps> = ({
       // Body cells from the visible window + new rows. Measure display text,
       // not the DOM — this is width-agnostic so shrink/grow both work.
       const samples: unknown[] = [];
-      vRows.forEach((row) => samples.push(row[rawIdx]));
+      vRowsRef.current.forEach((row) => samples.push(row[rawIdx]));
       (newRows || []).forEach((nr) => samples.push(nr.values[name] ?? null));
       samples.forEach((v) => { maxW = Math.max(maxW, measureTextWidth(cellToText(v), 12)); });
       // px-3 padding both sides (12px each) + a little slack.
       return maxW > 0 ? maxW + 28 : null;
     },
-    [columnIndex, columns, vRows, newRows],
+    [columnIndex, columns, newRows],
   );
-  const { widths: colWidths, startResize, lockWidths, autoFitColumn, isLocked } =
+  const { widths: colWidths, startResize, lockWidths, autoFitColumn } =
     useColumnResize(columnStorageKey, measureColumn);
-  // Auto-fit (table-auto) until widths are locked or manually set, then
-  // table-fixed so scrolling can't shift column widths.
-  const hasCustomWidths = colWidths.size > 0;
-  const useFixedLayout = hasCustomWidths || isLocked;
+  // Every column always renders at an explicit pixel width (no table-auto
+  // equivalent here) — DEFAULT_COL_WIDTH until the auto-fit-lock effect below
+  // snapshots real widths, then whatever's in `colWidths` (auto-fit or a
+  // manual drag).
+  const colWidth = useCallback((name: string) => colWidths.get(name) ?? DEFAULT_COL_WIDTH, [colWidths]);
 
   // Hide/show columns dropdown state (the toggle lives in the header).
   const [colMenuOpen, setColMenuOpen] = useState(false);
@@ -474,11 +512,7 @@ export const DataGrid: React.FC<DataGridProps> = ({
     if (didLockRef.current) return;
     if (!visibleColumns.length || !rows.length) return;
     // Snapshot on the next frame so the browser has laid out the visible
-    // rows this measurement reads from. Widths come from measureColumn's
-    // canvas text measurement (same one double-click-to-autofit uses) rather
-    // than the DOM's table-auto offsetWidth — table-auto stretches columns
-    // to fill any remaining table width, which produced columns wider than
-    // their actual content on first load.
+    // rows this measurement reads from.
     const id = requestAnimationFrame(() => {
       const m = new Map<string, number>();
       visibleColumns.forEach((c) => {
@@ -551,12 +585,21 @@ export const DataGrid: React.FC<DataGridProps> = ({
   // that reference is stale, so close the panel rather than show old data.
   useEffect(() => { setInspectRow(null); }, [rowsKey, colsKey]);
 
-  const colCount = visibleColumns.length + (hasSelection ? 1 : 0) + (hasDelete ? 1 : 0) + 2; // +1 row #, +1 col-toggle
-
   // Position of the inspected row within the current (filtered+sorted) set —
   // used for its "#N" header. If the row fell out of view (filtered away)
   // this comes back -1 and the panel simply doesn't render.
   const inspectIdx = inspectRow ? displayRows.indexOf(inspectRow) : -1;
+
+  // ── Grid geometry (div/flex body — see the Layout constants comment) ─────
+  const totalWidth =
+    (hasSelection ? SELECT_COL_W : 0) +
+    (hasDelete ? DELETE_COL_W : 0) +
+    ROWNUM_COL_W +
+    visibleColumns.reduce((sum, c) => sum + colWidth(c.name), 0) +
+    COLTOGGLE_COL_W;
+  const showEmpty = rows.length === 0 && (!newRows || newRows.length === 0);
+  const bodyRowCount = displayRows.length + (newRows?.length ?? 0);
+  const totalHeight = HEADER_HEIGHT + bodyRowCount * ROW_HEIGHT + (showEmpty ? EMPTY_STATE_H : 0);
 
   return (
     <>
@@ -569,120 +612,148 @@ export const DataGrid: React.FC<DataGridProps> = ({
       />
       <div className="flex-1 flex flex-row min-h-0" ref={gridRowRef}>
       <div ref={scrollRef} onScroll={onScroll} className="flex-1 min-w-0 overflow-auto bg-[#06090e]">
-        <table className={`w-full text-left text-xs font-mono text-slate-200 border-collapse ${useFixedLayout ? 'table-fixed' : 'table-auto'}`}>
-          <thead className="bg-[#0f172a] border-b border-[#1e293b] sticky top-0 text-slate-400 uppercase text-[10px] tracking-wider z-10">
-            <tr>
-              {hasSelection && (
-                <th className="py-2 px-2 border-r border-[#1e293b] w-9 text-center">
-                  <input
-                    type="checkbox"
-                    checked={!!selectedRows && selectedRows.size > 0 && selectedRows.size === displayRows.length}
-                    onChange={(e) => onToggleSelectAll?.(e.target.checked)}
-                    className="rounded border-[#1e293b] text-blue-600 focus:ring-0 cursor-pointer"
+        <div
+          className="relative text-left text-xs font-mono text-slate-200"
+          style={{ width: totalWidth, minWidth: '100%', height: totalHeight }}
+        >
+          {/* ── Header (sticky within the scroll container) ──────────────── */}
+          <div
+            className="sticky top-0 z-10 flex bg-[#0f172a] border-b border-[#1e293b] text-slate-400 uppercase text-[10px] tracking-wider"
+            style={{ height: HEADER_HEIGHT, width: totalWidth }}
+          >
+            {hasSelection && (
+              <div
+                className="flex items-center justify-center shrink-0 border-r border-[#1e293b]"
+                style={{ width: SELECT_COL_W }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!selectedRows && selectedRows.size > 0 && selectedRows.size === displayRows.length}
+                  onChange={(e) => onToggleSelectAll?.(e.target.checked)}
+                  className="rounded border-[#1e293b] text-blue-600 focus:ring-0 cursor-pointer"
+                />
+              </div>
+            )}
+            {hasDelete && (
+              <div
+                className="flex items-center justify-center shrink-0 border-r border-[#1e293b] text-slate-500"
+                style={{ width: DELETE_COL_W }}
+              >
+                🗑
+              </div>
+            )}
+            <div
+              className="flex items-center justify-center shrink-0 border-r border-[#1e293b] text-slate-500"
+              style={{ width: ROWNUM_COL_W }}
+            >
+              #
+            </div>
+            {visibleColumns.map((col) => {
+              const isSorted = sortState?.column === col.name;
+              const sortDir = isSorted ? sortState!.dir : null;
+              const w = colWidth(col.name);
+              return (
+                <div
+                  key={col.name}
+                  onClick={() => toggleSort(col.name)}
+                  style={{ width: w }}
+                  className={`relative flex items-center px-3 shrink-0 border-r border-[#1e293b] cursor-pointer select-none hover:bg-[#141e33] ${
+                    isSorted ? 'text-cyan-300' : ''
+                  }`}
+                  title={`Sort by ${col.name}`}
+                >
+                  <div className="flex items-center justify-between gap-1 w-full min-w-0">
+                    <span className="flex items-center gap-0.5 truncate">
+                      {/* Key / FK / index badges — compact, only the relevant ones. */}
+                      {(col.is_primary_key || col.is_foreign_key || col.is_indexed) && (
+                        <span className="flex items-center gap-0.5 mr-0.5 shrink-0">
+                          {col.is_primary_key && (
+                            <span title="Primary key"><Key className="w-3 h-3 text-amber-400" /></span>
+                          )}
+                          {col.is_foreign_key && (
+                            <span title="Foreign key"><Link2 className="w-3 h-3 text-cyan-400" /></span>
+                          )}
+                          {col.is_indexed && !col.is_primary_key && (
+                            <span title="Indexed"><ListStart className="w-3 h-3 text-purple-400" /></span>
+                          )}
+                        </span>
+                      )}
+                      {col.name}
+                      {col.is_required && (
+                        <span className="text-red-500 ml-0.5" title="Required — NOT NULL with no default">*</span>
+                      )}
+                      {sortDir === 'asc' && <ArrowUp className="w-3 h-3 text-cyan-400 shrink-0" />}
+                      {sortDir === 'desc' && <ArrowDown className="w-3 h-3 text-cyan-400 shrink-0" />}
+                      {!sortDir && (
+                        <ChevronsUpDown className="w-3 h-3 text-slate-700 opacity-0 group-hover/th:opacity-100 shrink-0" />
+                      )}
+                    </span>
+                    {col.data_type && <span className="text-[9px] text-slate-600 lowercase shrink-0">{col.data_type}</span>}
+                  </div>
+                  {/* Resize handle — drag to resize, double-click to auto-fit
+                      the column to its content width. */}
+                  <div
+                    onMouseDown={startResize(col.name)}
+                    onDoubleClick={(e) => { e.stopPropagation(); autoFitColumn(col.name); }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute top-0 right-[-2px] h-full w-1.5 cursor-col-resize hover:bg-cyan-500/40 z-20"
+                    title="Drag to resize · Double-click to auto-fit"
                   />
-                </th>
-              )}
-              {hasDelete && <th className="px-2 py-2 border-r border-[#1e293b] w-10 text-center text-slate-500">🗑</th>}
-              <th className="px-3 py-2 border-r border-[#1e293b] w-10 text-center text-slate-500">#</th>
-              {visibleColumns.map((col, colIdx) => {
-                const isSorted = sortState?.colIdx === colIdx;
-                const sortDir = isSorted ? sortState!.dir : null;
-                const w = colWidths.get(col.name);
-                return (
-                  <th
-                    key={col.name}
-                    onClick={() => toggleSort(colIdx)}
-                    style={{ width: w }}
-                    className={`relative px-3 py-2 border-r border-[#1e293b] ${w ? '' : 'min-w-[140px]'} cursor-pointer select-none hover:bg-[#141e33] transition-colors ${
-                      isSorted ? 'text-cyan-300' : ''
-                    }`}
-                    title={`Sort by ${col.name}`}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="flex items-center gap-0.5 truncate">
-                        {/* Key / FK / index badges — compact, only the relevant ones. */}
-                        {(col.is_primary_key || col.is_foreign_key || col.is_indexed) && (
-                          <span className="flex items-center gap-0.5 mr-0.5 shrink-0">
-                            {col.is_primary_key && (
-                              <span title="Primary key"><Key className="w-3 h-3 text-amber-400" /></span>
-                            )}
-                            {col.is_foreign_key && (
-                              <span title="Foreign key"><Link2 className="w-3 h-3 text-cyan-400" /></span>
-                            )}
-                            {col.is_indexed && !col.is_primary_key && (
-                              <span title="Indexed"><ListStart className="w-3 h-3 text-purple-400" /></span>
-                            )}
-                          </span>
-                        )}
-                        {col.name}
-                        {col.is_required && (
-                          <span className="text-red-500 ml-0.5" title="Required — NOT NULL with no default">*</span>
-                        )}
-                        {sortDir === 'asc' && <ArrowUp className="w-3 h-3 text-cyan-400 shrink-0" />}
-                        {sortDir === 'desc' && <ArrowDown className="w-3 h-3 text-cyan-400 shrink-0" />}
-                        {!sortDir && (
-                          <ChevronsUpDown className="w-3 h-3 text-slate-700 opacity-0 group-hover/th:opacity-100 shrink-0" />
-                        )}
-                      </span>
-                      {col.data_type && <span className="text-[9px] text-slate-600 lowercase shrink-0">{col.data_type}</span>}
-                    </div>
-                    {/* Resize handle — drag to resize, double-click to auto-fit
-                        the column to its content width. */}
-                    <div
-                      onMouseDown={startResize(col.name)}
-                      onDoubleClick={(e) => { e.stopPropagation(); autoFitColumn(col.name); }}
-                      onClick={(e) => e.stopPropagation()}
-                      className="absolute top-0 right-[-2px] h-full w-1.5 cursor-col-resize hover:bg-cyan-500/40 z-20"
-                      title="Drag to resize · Double-click to auto-fit"
-                    />
-                  </th>
-                );
-              })}
-              {/* Hide/show columns toggle. */}
-              <th className="relative px-2 py-2 w-8 text-center text-slate-500">
-                <div ref={colMenuRef} className="relative">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setColMenuOpen((v) => !v); }}
-                    className={`p-0.5 rounded hover:bg-[#1e293b] transition-colors ${hiddenCols.size > 0 ? 'text-cyan-400' : 'text-slate-500'}`}
-                    title="Hide/show columns"
-                  >
-                    <Columns3 className="w-3.5 h-3.5" />
-                  </button>
-                  {colMenuOpen && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="absolute right-0 top-full mt-1 z-50 bg-[#0a0f18] border border-[#1e293b] rounded-lg shadow-2xl py-1 min-w-[180px] max-h-72 overflow-y-auto text-left normal-case"
-                    >
-                      <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-slate-500">Columns</div>
-                      {columns.map((c) => {
-                        const checked = !hiddenCols.has(c.name);
-                        return (
-                          <label key={c.name} className="flex items-center gap-2 px-2.5 py-1 hover:bg-[#141e33] cursor-pointer text-[11px] text-slate-200 font-normal">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => {
-                                setHiddenCols((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(c.name)) next.delete(c.name);
-                                  else next.add(c.name);
-                                  return next;
-                                });
-                              }}
-                              className="rounded border-[#1e293b] text-blue-600 focus:ring-0"
-                            />
-                            <span className="truncate">{c.name}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
                 </div>
-              </th>
-            </tr>
-          </thead>
-        <tbody>
-          {spacerTop > 0 && <tr style={{ height: spacerTop }} className="bg-[#06090e]"><td colSpan={colCount} /></tr>}
+              );
+            })}
+            {/* Hide/show columns toggle — pinned to the right edge of the
+                viewport (not the end of the scrollable content) via
+                `sticky right-0`. With many columns this button used to sit
+                past the last one, so reaching it meant scrolling all the way
+                right first; now it's always reachable without scrolling. */}
+            <div
+              className="sticky right-0 z-30 flex items-center justify-center shrink-0 text-center text-slate-500 bg-[#0f172a] border-l border-[#1e293b] shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.4)]"
+              style={{ width: COLTOGGLE_COL_W }}
+            >
+              <div ref={colMenuRef} className="relative">
+                <button
+                  onClick={(e) => { e.stopPropagation(); setColMenuOpen((v) => !v); }}
+                  className={`p-0.5 rounded hover:bg-[#1e293b] transition-colors ${hiddenCols.size > 0 ? 'text-cyan-400' : 'text-slate-500'}`}
+                  title="Hide/show columns"
+                >
+                  <Columns3 className="w-3.5 h-3.5" />
+                </button>
+                {colMenuOpen && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute right-0 top-full mt-1 z-50 bg-[#0a0f18] border border-[#1e293b] rounded-lg shadow-2xl py-1 min-w-[180px] max-h-72 overflow-y-auto text-left normal-case"
+                  >
+                    <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-slate-500">Columns</div>
+                    {columns.map((c) => {
+                      const checked = !hiddenCols.has(c.name);
+                      return (
+                        <label key={c.name} className="flex items-center gap-2 px-2.5 py-1 hover:bg-[#141e33] cursor-pointer text-[11px] text-slate-200 font-normal">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setHiddenCols((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(c.name)) next.delete(c.name);
+                                else next.add(c.name);
+                                return next;
+                              });
+                            }}
+                            className="rounded border-[#1e293b] text-blue-600 focus:ring-0"
+                          />
+                          <span className="truncate">{c.name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Virtualized rows (absolutely positioned — see the Layout
+              constants comment for why) ──────────────────────────────────── */}
           {vRows.map((row, vi) => {
             const rowIdx = vStart + vi;
             const absoluteIdx = rowNumberOffset + rowIdx + 1;
@@ -690,9 +761,18 @@ export const DataGrid: React.FC<DataGridProps> = ({
             const isDeleted = pendingDeletes?.has(row) ?? false;
             const rowEdits = pendingUpdates?.get(row);
             return (
-              <tr
-                key={rowIdx}
-                className={`border-b border-[#1e293b]/50 transition-colors ${
+              <div
+                // Keyed by slot position (vi), not absolute row index — an
+                // index-based key changes identity for almost every row on
+                // every scroll tick, forcing React to unmount+remount nearly
+                // every row instead of recycling the same DOM nodes.
+                key={vi}
+                style={{ position: 'absolute', top: HEADER_HEIGHT + rowIdx * ROW_HEIGHT, left: 0, width: totalWidth, height: ROW_HEIGHT }}
+                // No `transition-colors`: as rows scroll past a stationary
+                // cursor, each one fires a hover-in/hover-out, and an
+                // interpolated transition on that is continuous repaint work
+                // fighting the scroll compositor. An instant hover has none.
+                className={`flex border-b border-[#1e293b]/50 ${
                   isDeleted
                     ? 'bg-red-950/20 text-red-400/70 line-through'
                     : isSelected
@@ -703,17 +783,23 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 }`}
               >
                 {hasSelection && (
-                  <td className="py-1 px-2 border-r border-[#1e293b]/50 text-center">
+                  <div
+                    className="flex items-center justify-center shrink-0 border-r border-[#1e293b]/50"
+                    style={{ width: SELECT_COL_W }}
+                  >
                     <input
                       type="checkbox"
                       checked={isSelected}
                       onChange={() => onToggleSelectRow?.(row)}
                       className="rounded border-[#1e293b] text-blue-600 focus:ring-0 cursor-pointer"
                     />
-                  </td>
+                  </div>
                 )}
                 {hasDelete && (
-                  <td className="px-2 py-1 border-r border-[#1e293b]/50 text-center">
+                  <div
+                    className="flex items-center justify-center shrink-0 border-r border-[#1e293b]/50"
+                    style={{ width: DELETE_COL_W }}
+                  >
                     <button
                       onClick={() => onToggleRowDelete?.(row)}
                       className={`p-0.5 rounded hover:bg-[#1e293b] transition-colors ${
@@ -723,16 +809,17 @@ export const DataGrid: React.FC<DataGridProps> = ({
                     >
                       {isDeleted ? <Undo2 className="w-3 h-3" /> : <Trash2 className="w-3 h-3" />}
                     </button>
-                  </td>
+                  </div>
                 )}
-                <td
+                <div
                   onClick={() => setInspectRow(row)}
-                  className="group/rownum px-3 py-1.5 border-r border-[#1e293b] text-slate-500 text-center select-none text-[11px] cursor-pointer"
+                  className="group/rownum flex items-center justify-center shrink-0 border-r border-[#1e293b] text-slate-500 select-none text-[11px] cursor-pointer"
+                  style={{ width: ROWNUM_COL_W }}
                   title="Inspect row"
                 >
                   <span className="group-hover/rownum:hidden">{absoluteIdx}</span>
                   <Expand className="w-3 h-3 mx-auto hidden group-hover/rownum:block text-cyan-400" />
-                </td>
+                </div>
                 {visibleColumns.map((col, colIdx) => {
                   const rawColIdx = columnIndex.get(col.name) ?? colIdx;
                   const cell = row[rawColIdx];
@@ -740,13 +827,14 @@ export const DataGrid: React.FC<DataGridProps> = ({
                   const isEditing = editingCell?.rowIdx === rowIdx && editingCell?.colIdx === colIdx;
                   const hasPendingEdit = rowEdits && colName && Object.prototype.hasOwnProperty.call(rowEdits, colName);
                   const displayValue = hasPendingEdit ? rowEdits![colName] : cell;
-                  const editorKind = getEditorKind(col?.data_type);
+                  const editorKind = resolveEditorKind(col);
                   const relation = fkMap?.get(colName);
+                  const w = colWidth(colName);
 
                   return (
-                    <td
+                    <div
                       key={colIdx}
-                      ref={isEditing ? (el: HTMLTableCellElement | null) => {
+                      ref={isEditing ? (el: HTMLDivElement | null) => {
                         editingCellRef.current = el;
                         // Focus the first input/select inside the editing cell,
                         // matching the new-row approach (external focus via ref,
@@ -763,12 +851,12 @@ export const DataGrid: React.FC<DataGridProps> = ({
                         startEdit(rowIdx, colIdx);
                       }}
                       onContextMenu={(e) => onCellContextMenu?.(e, row, colName || '')}
-                      className={`group/cell relative px-3 border-r border-[#1e293b]/50 ${
-                        isEditing ? 'flex items-center overflow-visible' : 'py-1.5 overflow-hidden'
+                      style={{ width: w, height: ROW_HEIGHT }}
+                      className={`group/cell relative flex items-center px-3 shrink-0 border-r border-[#1e293b]/50 min-w-0 ${
+                        isEditing ? 'overflow-visible' : 'overflow-hidden'
                       } ${
                         !isDeleted && editable ? 'cursor-text' : ''
                       } ${hasPendingEdit ? 'bg-amber-500/10' : ''}`}
-                      style={{ height: ROW_HEIGHT }}
                     >
                       {isEditing ? (
                         relation && relationConnection ? (
@@ -799,12 +887,13 @@ export const DataGrid: React.FC<DataGridProps> = ({
                             onChange={setDraft}
                             onCommit={commitEdit}
                             onDiscard={discardEdit}
+                            enumValues={col?.enum_values}
                             autoFocus
                           />
                         )
                       ) : (
                         <>
-                          <span className="inline-flex items-center gap-1 truncate">
+                          <span className="inline-flex items-center gap-1 truncate min-w-0">
                             <CellContent
                               value={displayValue as CellValue}
                               editorKind={editorKind}
@@ -822,7 +911,11 @@ export const DataGrid: React.FC<DataGridProps> = ({
                                 e.stopPropagation();
                                 onOpenModalEditor(row, colName || '', col?.data_type);
                               }}
-                              className="absolute top-1/2 right-0.5 -translate-y-1/2 shrink-0 p-0.5 rounded text-slate-600 hover:text-blue-400 hover:bg-[#1e293b] opacity-0 group-hover/cell:opacity-100 focus:opacity-100 transition-opacity"
+                              // No `transition-opacity` — every cell the
+                              // cursor passes over during a scroll would
+                              // otherwise animate this, same reasoning as the
+                              // row's hover transition above.
+                              className="absolute top-1/2 right-0.5 -translate-y-1/2 shrink-0 p-0.5 rounded text-slate-600 hover:text-blue-400 hover:bg-[#1e293b] opacity-0 group-hover/cell:opacity-100 focus:opacity-100"
                               title="Open in editor"
                             >
                               <Pencil className="w-3 h-3" />
@@ -830,46 +923,56 @@ export const DataGrid: React.FC<DataGridProps> = ({
                           )}
                         </>
                       )}
-                    </td>
+                    </div>
                   );
                 })}
-              </tr>
+              </div>
             );
           })}
-          {spacerBottom > 0 && <tr style={{ height: spacerBottom }} className="bg-[#06090e]"><td colSpan={colCount} /></tr>}
 
-          {/* Pending insert rows — always fully mounted (not virtualized) since
-              there are typically only 1-3 at a time. Each cell is directly
-              editable (no double-click needed) and has emerald styling. */}
-          {newRows && newRows.length > 0 && newRows.map((nr) => (
-            <tr key={nr.tempId} className="bg-emerald-600/10 border-b border-emerald-500/20">
-              {hasSelection && <td className="border-r border-[#1e293b]/50" />}
-              <td className="px-2 py-1 border-r border-[#1e293b]/50 text-center text-emerald-400 text-[9.5px] font-bold">
-                <div className="flex items-center justify-center gap-1">
-                  {onNewRowRemove && (
-                    <button
-                      onClick={() => onNewRowRemove(nr.tempId)}
-                      className="text-red-400 hover:text-red-300"
-                      title="Discard new row"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  )}
-                  <span>NEW</span>
-                </div>
-              </td>
-              <td className="border-r border-[#1e293b]/50" />
+          {/* Pending insert rows — always fully mounted (not virtualized)
+              since there are typically only 1-3 at a time, placed right after
+              the (virtualized) main row set. Each cell is directly editable
+              (no double-click needed) and has emerald styling. */}
+          {newRows && newRows.length > 0 && newRows.map((nr, nrIdx) => (
+            <div
+              key={nr.tempId}
+              style={{
+                position: 'absolute',
+                top: HEADER_HEIGHT + (displayRows.length + nrIdx) * ROW_HEIGHT,
+                left: 0,
+                width: totalWidth,
+                height: ROW_HEIGHT,
+              }}
+              className="flex bg-emerald-600/10 border-b border-emerald-500/20"
+            >
+              {hasSelection && <div className="shrink-0 border-r border-[#1e293b]/50" style={{ width: SELECT_COL_W }} />}
+              <div
+                className="flex items-center justify-center shrink-0 border-r border-[#1e293b]/50 text-emerald-400 text-[9.5px] font-bold gap-1"
+                style={{ width: ROWNUM_COL_W }}
+              >
+                {onNewRowRemove && (
+                  <button
+                    onClick={() => onNewRowRemove(nr.tempId)}
+                    className="text-red-400 hover:text-red-300"
+                    title="Discard new row"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
               {visibleColumns.map((col, colIdx) => {
                 const rawVal = nr.values[col.name] ?? null;
                 const relation = fkMap?.get(col.name);
                 const isEmpty = rawVal === null || rawVal === undefined || rawVal === '';
                 const invalid = col.is_required && isEmpty;
+                const w = colWidth(col.name);
                 return (
-                  <td
+                  <div
                     key={col.name}
                     ref={
                       colIdx === 0 && nr.tempId === focusNewRowId
-                        ? (el: HTMLTableCellElement | null) => {
+                        ? (el: HTMLDivElement | null) => {
                             if (el && !autoFocusedNewRowIds.current.has(nr.tempId)) {
                               const input = el.querySelector('input, select, textarea');
                               if (input) {
@@ -880,10 +983,10 @@ export const DataGrid: React.FC<DataGridProps> = ({
                           }
                         : undefined
                     }
-                    className="px-1 border-r border-[#1e293b]/50"
-                    style={{ height: ROW_HEIGHT }}
+                    className="flex items-center px-1 shrink-0 border-r border-[#1e293b]/50 min-w-0"
+                    style={{ width: w, height: ROW_HEIGHT }}
                   >
-                    <div className="flex items-center gap-0.5 px-0.5" style={{ height: 24 }}>
+                    <div className="flex items-center gap-0.5 px-0.5 w-full min-w-0" style={{ height: 24 }}>
                       {relation && relationConnection ? (
                         <RelationCellInput
                           connection={relationConnection}
@@ -903,7 +1006,8 @@ export const DataGrid: React.FC<DataGridProps> = ({
                         />
                       ) : (
                         <TypedCellInput
-                          kind={getEditorKind(col.data_type)}
+                          kind={resolveEditorKind(col)}
+                          enumValues={col.enum_values}
                           value={rawVal ?? ''}
                           onChange={(v) => onNewRowEdit?.(nr.tempId, col.name, v === '' ? null : v)}
                           placeholder={col.name}
@@ -928,21 +1032,21 @@ export const DataGrid: React.FC<DataGridProps> = ({
                         </button>
                       )}
                     </div>
-                  </td>
+                  </div>
                 );
               })}
-            </tr>
+            </div>
           ))}
 
-          {rows.length === 0 && (!newRows || newRows.length === 0) && (
-            <tr>
-              <td colSpan={colCount} className="py-8 text-center text-slate-600 text-xs">
-                No rows.
-              </td>
-            </tr>
+          {showEmpty && (
+            <div
+              style={{ position: 'absolute', top: HEADER_HEIGHT, left: 0, width: '100%' }}
+              className="py-8 text-center text-slate-600 text-xs"
+            >
+              No rows.
+            </div>
           )}
-        </tbody>
-      </table>
+        </div>
       </div>
 
       {/* Docked row-inspector panel — every column of the selected row in
@@ -993,14 +1097,24 @@ const InlineCellEditor: React.FC<{
   onCommit: () => void;
   onDiscard: () => void;
   autoFocus?: boolean;
-}> = ({ kind, value, onChange, onCommit, onDiscard, autoFocus }) => {
+  enumValues?: string[] | null;
+}> = ({ kind, value, onChange, onCommit, onDiscard, autoFocus, enumValues }) => {
   return (
     <div className="flex items-center w-full px-0.5" style={{ height: 24 }}>
       <TypedCellInput
         kind={kind}
         value={value}
         onChange={onChange}
-        onBlur={onCommit}
+        enumValues={enumValues}
+        // Wrapped, not passed directly: `TypedCellInput`'s `onBlur` forwards
+        // the native focus event through to whatever handler it's given
+        // (despite being typed as `() => void`), so `onBlur={onCommit}`
+        // called `commitEdit(focusEvent)` — the event object as
+        // `overrideValue` — and committed "[object Object]" as the cell's
+        // new value on any blur-triggered commit (Tab, click elsewhere, or
+        // React unmounting this input after a click-outside commit already
+        // ran). The wrapper discards whatever argument it's called with.
+        onBlur={() => onCommit()}
         autoFocus={autoFocus}
         onKeyDown={(e) => {
           if (e.key === 'Escape') { e.preventDefault(); onDiscard(); }

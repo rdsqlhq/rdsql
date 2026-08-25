@@ -204,7 +204,7 @@ pub fn run_duckdb_query(config: &ConnectionConfig, sql: &str) -> Result<QueryRes
             .map(|i| {
                 let name = stmt.column_name(i).map(|s| s.to_string()).unwrap_or_default();
                 let ty = format!("{:?}", stmt.column_type(i)).to_uppercase();
-                QueryColumn { name, data_type: ty }
+                QueryColumn { name, data_type: ty, enum_values: None }
             })
             .collect();
 

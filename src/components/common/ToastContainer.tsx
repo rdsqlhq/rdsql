@@ -20,16 +20,20 @@ const ToastItem: React.FC<{
   message?: string;
   actionLabel?: string;
   onAction?: () => void;
-}> = ({ id, severity, title, message, actionLabel, onAction }) => {
+  persistent?: boolean;
+}> = ({ id, severity, title, message, actionLabel, onAction, persistent }) => {
   const dismiss = useToastStore((s) => s.dismiss);
   const style = SEVERITY_STYLE[severity];
   const Icon = style.Icon;
 
-  // Auto-dismiss after 6s.
+  // Auto-dismiss after 6s — unless the toast is tracking a long-running
+  // operation (e.g. an update download) that must stay visible until it's
+  // explicitly updated to a terminal state.
   useEffect(() => {
+    if (persistent) return;
     const t = setTimeout(() => dismiss(id), 6000);
     return () => clearTimeout(t);
-  }, [id, dismiss]);
+  }, [id, dismiss, persistent]);
 
   return (
     <div
@@ -79,6 +83,7 @@ export const ToastContainer: React.FC = () => {
           message={t.message}
           actionLabel={t.actionLabel}
           onAction={t.onAction}
+          persistent={t.persistent}
         />
       ))}
     </div>

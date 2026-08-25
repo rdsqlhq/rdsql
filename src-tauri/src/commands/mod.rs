@@ -36,3 +36,6 @@ pub mod mongo;
 // rdSQL Cloudflare backend: accounts, OAuth device-linking, pairing,
 // entitlement, encrypted connection sync. See commands::backend's module doc.
 pub mod backend;
+// Cross-engine database migration wizard (isolated module; all commands are
+// additive). See `migrate::canonical`'s module doc for the design.
+pub mod migrate;
