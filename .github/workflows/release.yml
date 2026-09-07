@@ -24,15 +24,17 @@ jobs:
         include:
           - platform: 'macos-latest' # ARM64 macOS (Apple Silicon)
             target: 'aarch64-apple-darwin'
+          - platform: 'macos-13' # Intel macOS (x86_64) — native, not cross
+            target: 'x86_64-apple-darwin'
           - platform: 'windows-latest' # Windows x64
             target: 'x86_64-pc-windows-msvc'
           - platform: 'ubuntu-22.04' # Linux x64
             target: 'x86_64-unknown-linux-gnu'
-          # NOTE: macOS Intel (x86_64-apple-darwin on macos-13) intentionally
-          # omitted — the macos-13 runner requires a paid GitHub plan. Apple
-          # Silicon users get a native arm64 build; Intel Mac users can run
-          # the arm64 build under Rosetta, or build locally with
-          # `make build-macos-x64`.
+          # macos-13 is the last Intel-hosted image and is free for public
+          # repos (only the *-large variants / private repos are billed), so
+          # Intel Mac users get a native x86_64 .dmg. The Homebrew cask
+          # (scripts/release/update-homebrew-cask.sh) also needs this leg —
+          # it skips the tap bump when the _x64.dmg checksum is absent.
 
     runs-on: ${{ matrix.platform }}
 
@@ -204,7 +206,7 @@ jobs:
             exit 0
           fi
           VERSION="${GITHUB_REF_NAME#v}"
-          targets=(aarch64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu)
+          targets=(aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu)
           files="[]"
           for t in "${targets[@]}"; do
             npx wrangler r2 object get "rdsql-downloads/manifest/$t.json" --file "frag-$t.json" --remote

@@ -16,7 +16,7 @@ import {
   Link2,
   Cloud,
 } from 'lucide-react';
-import { DatabaseConnection, QueryResultData, QueryColumn, SchemaGroupNode, SchemaTableNode } from '../../core/domain/types';
+import { DatabaseConnection, QueryResultData, SchemaGroupNode, SchemaTableNode } from '../../core/domain/types';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { useConnectionStore } from '../../store/useConnectionStore';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
@@ -27,6 +27,7 @@ import {
   selectOffsetChunkSql,
 } from '../../core/backup/backupSql';
 import { buildBackupPlan, generateDataStatements, type TableSelection } from '../../core/backup/backupEngine';
+import { isMysqlFamily } from '../../core/connection/engines';
 import { describeFsError } from '../../core/utils/fsErrors';
 import { copyToClipboard } from '../../core/utils/clipboard';
 import { tempDir } from '../../core/utils/tempDir';
@@ -496,6 +497,26 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     const errorBox = { any: false };
     let tablesCompleted = 0;
 
+    // Every `execute_query` IPC call opens its OWN fresh DB connection (see
+    // query.rs) — the one-shot `SET FOREIGN_KEY_CHECKS = 0` issued above ran
+    // on a connection that's already gone, so DROP/CREATE/INSERT sent here
+    // land with FK enforcement back at its default (on). That breaks a live
+    // MySQL restore two ways: `DROP TABLE` on an FK-referenced parent fails,
+    // so the stale table survives `CREATE TABLE IF NOT EXISTS` and a later
+    // `INSERT` hits the old schema ("Unknown column ..."). Re-issue the
+    // disable as a prefix in the SAME call as the statements it must protect.
+    // MySQL-family only: it needs no privilege and mysql_async runs the
+    // multi-statement string fine; Postgres' `session_replication_role`
+    // needs superuser and would turn one tolerated failure into one per
+    // batch, and other engines' per-call drivers may reject multi-statement.
+    const fkPrefix =
+      destination === 'connection' &&
+      isMysqlFamily(connection.engine) &&
+      plan.capabilities.canDisableFkChecks &&
+      plan.capabilities.fkDisableSql
+        ? plan.capabilities.fkDisableSql.trim().replace(/;+\s*$/, '') + ';\n'
+        : '';
+
     // Helper: execute a batch of SQL statements against the destination. In
     // 'fast' mode, all statements are joined into one IPC call (one connection
     // cycle). In 'safe' mode, each statement gets its own IPC call.
@@ -508,17 +529,18 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
       try {
         if (speedMode === 'fast') {
           // One IPC call for the entire batch — join with single semicolons.
-          const batchSql = normalized.join(';\n');
+          const batchSql = fkPrefix + normalized.join(';\n');
           await safeInvoke('execute_query', {
             request: { config: applyConn!, sql: batchSql },
             queryId: `backup_batch_${label}_${Date.now()}`,
             __meta: { source: 'backup' },
           });
         } else {
-          // Safe mode: one IPC per statement (reliable, granular errors).
+          // Safe mode: one IPC per statement (reliable, granular errors) —
+          // still prefixed, since each statement is its own fresh connection.
           for (const stmt of normalized) {
             await safeInvoke('execute_query', {
-              request: { config: applyConn!, sql: stmt },
+              request: { config: applyConn!, sql: fkPrefix + stmt },
               queryId: `backup_${label}_${Date.now()}`,
               __meta: { source: 'backup' },
             });

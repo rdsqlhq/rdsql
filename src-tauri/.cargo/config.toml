@@ -1,0 +1,12 @@
+# Statically link the MSVC C/C++ runtime on Windows so the installed app
+# doesn't need the "Visual C++ Redistributable 2015-2022" present on the
+# target machine. Without this, a clean Windows box fails to launch rdSQL
+# with "MSVCP140.dll is missing" / "VCRUNTIME140.dll was not found" — the
+# Rust binary and the C++ deps compiled from source (duckdb-rs, etc.) link
+# msvcp140.dll / vcruntime140.dll dynamically by default.
+#
+# `+crt-static` makes `cc`/`cxx` compile those objects with /MT instead of
+# /MD too, so the whole binary is self-contained. Only affects the
+# x86_64-pc-windows-msvc target; macOS and Linux builds are unchanged.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
