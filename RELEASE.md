@@ -26,7 +26,7 @@ Releases are **tag-driven**. Pushing a tag matching `v*` triggers
 | Platform | Runner | Target |
 |---|---|---|
 | macOS Apple Silicon | `macos-latest` | `aarch64-apple-darwin` |
-| macOS Intel | `macos-13` | `x86_64-apple-darwin` |
+| macOS Intel | `macos-latest` (cross-compiled) | `x86_64-apple-darwin` |
 | Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` |
 | Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` |
 
