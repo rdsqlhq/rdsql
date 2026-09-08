@@ -24,17 +24,20 @@ jobs:
         include:
           - platform: 'macos-latest' # ARM64 macOS (Apple Silicon)
             target: 'aarch64-apple-darwin'
-          - platform: 'macos-13' # Intel macOS (x86_64) — native, not cross
+          - platform: 'macos-latest' # Intel macOS (x86_64) — cross-compiled from the arm64 runner
             target: 'x86_64-apple-darwin'
           - platform: 'windows-latest' # Windows x64
             target: 'x86_64-pc-windows-msvc'
           - platform: 'ubuntu-22.04' # Linux x64
             target: 'x86_64-unknown-linux-gnu'
-          # macos-13 is the last Intel-hosted image and is free for public
-          # repos (only the *-large variants / private repos are billed), so
-          # Intel Mac users get a native x86_64 .dmg. The Homebrew cask
-          # (scripts/release/update-homebrew-cask.sh) also needs this leg —
-          # it skips the tap bump when the _x64.dmg checksum is absent.
+          # The x86_64-apple-darwin leg is built on the arm64 macos-latest
+          # runner with `--target x86_64-apple-darwin` (dtolnay/rust-toolchain
+          # already adds the target) — the same cross-compile `make
+          # build-macos-x64` does locally. GitHub retired the Intel-hosted
+          # macos-13 image, so a native leg just sits queued forever. This
+          # gives Intel Mac users a native x86_64 .dmg and feeds the Homebrew
+          # cask bump (scripts/release/update-homebrew-cask.sh), which skips
+          # when the _x64.dmg checksum is absent.
 
     runs-on: ${{ matrix.platform }}
 
