@@ -456,6 +456,20 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
     // completion provider in onMount so it can read live schema data.
   };
 
+  // The Monaco editor instance is shared across every SQL tab (see the
+  // `lastSyncedTab` effect below) and `onMount` only ever fires once, the
+  // first time the editor mounts. The `editor.addAction` callbacks registered
+  // inside it are created in that same one-time render, so if they closed
+  // over `tabId`/`tab`/`running`/`activeConn`/`runSelectionOrAll`/`handleSave`
+  // directly they'd stay frozen to whatever those were at that first mount —
+  // forever, across every later tab switch and edit. That's what made
+  // Ctrl/Cmd+Enter (and Stop/Save/Refresh Schema, registered in the same
+  // block) appear to do nothing, or act on the wrong tab. Routing the actions
+  // through this ref — reassigned on every render — makes them always call
+  // the current render's versions instead.
+  const latestRef = useRef({ runSelectionOrAll, handleSave, stopQuery, tabId, activeConn, refreshSchema });
+  latestRef.current = { runSelectionOrAll, handleSave, stopQuery, tabId, activeConn, refreshSchema };
+
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco as MonacoNS;
@@ -471,7 +485,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter],
       contextMenuGroupId: 'rdsql',
       contextMenuOrder: 0,
-      run: () => runSelectionOrAll(),
+      run: () => latestRef.current.runSelectionOrAll(),
     });
 
     editor.addAction({
@@ -479,7 +493,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       label: 'Stop Query',
       contextMenuGroupId: 'rdsql',
       contextMenuOrder: 1,
-      run: () => { void stopQuery(tabId); },
+      run: () => { void latestRef.current.stopQuery(latestRef.current.tabId); },
     });
 
     // Formats the selection, or the whole buffer when nothing is selected.
@@ -498,7 +512,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
       contextMenuGroupId: 'rdsql',
       contextMenuOrder: 3,
-      run: () => { void handleSave(); },
+      run: () => { void latestRef.current.handleSave(); },
     });
 
     editor.addAction({
@@ -506,7 +520,10 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       label: 'Refresh Schema',
       contextMenuGroupId: 'rdsql',
       contextMenuOrder: 4,
-      run: () => { if (activeConn) refreshSchema(activeConn.id); },
+      run: () => {
+        const conn = latestRef.current.activeConn;
+        if (conn) latestRef.current.refreshSchema(conn.id);
+      },
     });
 
     // Only registered when a provider is configured — same gating as the
