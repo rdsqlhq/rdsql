@@ -165,12 +165,18 @@ jobs:
                 npx wrangler r2 object put "rdsql-downloads/$name" --file "$f" --remote \
                   && echo "    ✓ uploaded" \
                   || { echo "    ✗ failed"; continue; }
+                # Feed the file on stdin, not as an argument: on the Windows
+                # runner $f is a path with backslashes, and GNU coreutils
+                # then prefixes the digest line with "\" and escapes the
+                # filename — which leaked a stray leading backslash into the
+                # manifest's sha256. stdin form emits just "<hash>  -".
                 if command -v sha256sum >/dev/null 2>&1; then
-                  sha=$(sha256sum "$f" | cut -d' ' -f1)
+                  sha=$(sha256sum < "$f" | cut -d' ' -f1)
                 else
-                  sha=$(shasum -a 256 "$f" | cut -d' ' -f1)
+                  sha=$(shasum -a 256 < "$f" | cut -d' ' -f1)
                 fi
                 sha="${sha%$'\r'}"
+                sha="${sha#\\}"
                 size=$(wc -c < "$f" | tr -d '[:space:]')
                 fragment=$(echo "$fragment" | jq --arg name "$name" --arg sha "$sha" --argjson size "$size" \
                   '. + [{file: $name, sha256: $sha, size: $size}]')
