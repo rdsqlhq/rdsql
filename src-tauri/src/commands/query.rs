@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tokio_postgres::NoTls;
 use tokio_postgres::types::{FromSql, Kind, Type as PgType};
 use rusqlite::Connection;
 use mysql_async::prelude::*;
@@ -452,7 +451,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                 host, port, user, db, pass
             );
 
-            let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_postgres::connect(&conn_str, NoTls)).await {
+            let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, request.config.ssl_mode.as_deref())).await {
                 Ok(Ok(pair)) => pair,
                 Ok(Err(e)) => {
                     let mut d = from_postgres(e, None);

@@ -35,6 +35,27 @@ describe('parseEnvOrUrl', () => {
     expect(out.database).toBe('corp');
   });
 
+  it('parses a TablePlus-exported URL (no port, extra params, name)', () => {
+    const out = parseEnvOrUrl(
+      'postgresql://app-user:abc-XYZ@db.abc123.ap-southeast-5.rds.amazonaws.com/tenant_dev?statusColor=007F3D&env=&name=v2%20dev&tLSMode=0&usePrivateKey=false',
+    );
+    expect(out.engine).toBe('postgres');
+    expect(out.host).toBe('db.abc123.ap-southeast-5.rds.amazonaws.com');
+    expect(out.port).toBe(5432);
+    expect(out.username).toBe('app-user');
+    expect(out.password).toBe('abc-XYZ');
+    expect(out.database).toBe('tenant_dev');
+    expect(out.name).toBe('v2 dev');
+    expect(out.sslMode).toBeUndefined();
+  });
+
+  it('picks up SSL mode from URL query params', () => {
+    expect(parseConnectionUrl('postgres://u:p@h/db?sslmode=Require').sslMode).toBe('require');
+    expect(parseConnectionUrl('postgres://u:p@h/db?ssl=true').sslMode).toBe('require');
+    expect(parseConnectionUrl('mysql://u:p@h/db?ssl-mode=verify-ca').sslMode).toBe('VERIFY_CA');
+    expect(parseEnvOrUrl('DATABASE_URL=postgres://u:p@h/db?sslmode=verify-full').sslMode).toBe('verify-full');
+  });
+
   it('parses Laravel-style DB_* keys and maps DB_CONNECTION', () => {
     const env = `
       APP_NAME=Laravel
