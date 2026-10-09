@@ -17,7 +17,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-use tokio_postgres::NoTls;
 use rusqlite::Connection as SqliteConn;
 use duckdb::Connection as DuckdbConn;
 use mysql_async::prelude::*;
@@ -727,7 +726,7 @@ async fn fetch_table_snapshot_postgres(
     );
     let (client, connection) = match tokio::time::timeout(
         CONNECT_TIMEOUT,
-        tokio_postgres::connect(&conn_str, NoTls),
+        crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref()),
     )
     .await
     {
@@ -1579,7 +1578,7 @@ async fn run_ddl_postgres(config: &ConnectionConfig, sql: &str) -> Result<(), St
     );
     let (client, connection) = match tokio::time::timeout(
         CONNECT_TIMEOUT,
-        tokio_postgres::connect(&conn_str, NoTls),
+        crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref()),
     )
     .await
     {

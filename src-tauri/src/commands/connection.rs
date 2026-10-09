@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tokio_postgres::NoTls;
 use rusqlite::Connection;
 use mysql_async::prelude::*;
 
@@ -242,7 +241,7 @@ pub async fn test_connection(config: ConnectionConfig) -> Result<ConnectionTestR
                 host, port, user, db, pass
             );
 
-            match tokio::time::timeout(CONNECT_TIMEOUT, tokio_postgres::connect(&conn_str, NoTls)).await {
+            match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref())).await {
                 Ok(Ok((client, connection))) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
@@ -534,7 +533,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                 host, port, user, db, pass
             );
 
-            let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_postgres::connect(&conn_str, NoTls)).await {
+            let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref())).await {
                 Ok(Ok(pair)) => pair,
                 Ok(Err(e)) => return Err(e.to_string()),
                 Err(_) => {

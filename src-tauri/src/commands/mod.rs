@@ -9,6 +9,7 @@ pub mod query;
 // lives in connection.rs, but the tunneling logic itself is isolated here.
 pub mod ssh_tunnel;
 pub mod pool;
+pub mod pg_tls;
 pub mod transfer;
 pub mod storage;
 pub mod ai;

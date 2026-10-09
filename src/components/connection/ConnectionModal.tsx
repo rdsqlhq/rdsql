@@ -346,9 +346,11 @@ export const ConnectionModal: React.FC = () => {
     if (parsed.engine) setEngine(parsed.engine);
     if (parsed.host) setHost(parsed.host);
     if (parsed.port !== undefined) setPort(parsed.port);
-    if (parsed.database) { setDatabase(parsed.database); if (!name) setName(parsed.database); }
+    if (parsed.name) setName(parsed.name);
+    if (parsed.database) { setDatabase(parsed.database); if (!name && !parsed.name) setName(parsed.database); }
     if (parsed.username) setUsername(parsed.username);
     if (parsed.password) setPassword(parsed.password);
+    if (parsed.sslMode) setSslMode(parsed.sslMode);
     const unique = Array.from(new Set(parsed.appliedKeys));
     setAutofillMsg(
       unique.length > 0

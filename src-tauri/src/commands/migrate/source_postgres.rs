@@ -13,7 +13,6 @@
 //! literal string `"t"` would silently corrupt a MySQL `TINYINT(1)` target
 //! column (MySQL coerces a non-numeric string to `0`).
 
-use tokio_postgres::NoTls;
 
 use super::canonical::{CanonicalColumn, CanonicalType, CanonicalValue, ConversionNote, TableRef};
 use crate::commands::connection::{normalize_host, ConnectionConfig};
@@ -46,7 +45,7 @@ pub async fn connect(config: &ConnectionConfig) -> Result<(tokio_postgres::Clien
     let pass = config.password.clone().unwrap_or_default();
 
     let conn_str = format!("host={} port={} user={} dbname={} password={}", host, port, user, db, pass);
-    let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_postgres::connect(&conn_str, NoTls)).await {
+    let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref())).await {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             let mut d = from_postgres(e, None);

@@ -124,6 +124,59 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.target }}
 
+      # Mirrors the Makefile's `codesign-app` macro: tauri-action builds the
+      # DMG with an unsigned .app and nothing else on it, so re-sign the app
+      # with hardened runtime + entitlements (unsigned + quarantined is what
+      # triggers the scary "rdSQL is damaged" dialog on macOS Sonoma+ rather
+      # than the friendlier "unidentified developer" one) and rebuild the DMG
+      # with an /Applications symlink and a READ ME FIRST.txt explaining the
+      # Gatekeeper xattr workaround for the not-yet-code-signed build.
+      #
+      # The R2 upload below hashes whatever is on disk at these paths, so the
+      # website manifest and the Homebrew cask checksums match the repackaged
+      # DMG automatically. tauri-action already uploaded the pre-repackage
+      # DMG to the GitHub draft release during its own step, so clobber that
+      # asset with the rebuilt one (non-fatal: the website/Homebrew are the
+      # primary distribution channels, and on a workflow_dispatch run there
+      # may be no matching tag-release at all).
+      - name: Repackage macOS DMG (sign + README)
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          bundle_dir="src-tauri/target/${{ matrix.target }}/release/bundle"
+          app=$(find "$bundle_dir/macos" -maxdepth 1 -name '*.app' -print -quit)
+          if [ -n "$app" ]; then
+            codesign --deep --force \
+              --options runtime \
+              --entitlements src-tauri/entitlements.plist \
+              --sign - "$app" \
+              && echo "  ✓ signed (adhoc + hardened runtime)" \
+              || echo "  ⚠ codesign failed (non-fatal)"
+            # `|| true` because the runner's bash runs with -eo pipefail — a
+            # missing .dmg must reach the guard below, not kill the step.
+            dmg=$(ls "$bundle_dir/dmg"/*.dmg 2>/dev/null | head -1 || true)
+            if [ -n "$dmg" ]; then
+              staging=$(mktemp -d)
+              cp -R "$app" "$staging/"
+              ln -sf /Applications "$staging/Applications"
+              cp src-tauri/dmg/README.txt "$staging/READ ME FIRST.txt"
+              rm -f "$dmg"
+              hdiutil create -volname "rdSQL" -srcfolder "$staging" \
+                -ov -format UDZO "$dmg" >/dev/null 2>&1 \
+                && echo "  ✓ DMG re-packaged with README ($(basename "$dmg"))" \
+                || { echo "  ✗ DMG re-package failed"; exit 1; }
+              rm -rf "$staging"
+              gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber \
+                || echo "  ⚠ could not update the GitHub release asset (continuing)"
+            else
+              echo "  ⚠ no .dmg found to re-package"
+            fi
+          else
+            echo "  ⚠ no .app found to sign"
+          fi
+
       # Upload installers to Cloudflare R2 so the website's /download/<file>
       # endpoint can serve them. Skips updater sidecars (.sig, .tar.gz,
       # latest.json) — only real installers go to the bucket. Old versions'

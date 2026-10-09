@@ -8,7 +8,6 @@
 //! elsewhere in the app so behavior stays consistent.
 
 use std::time::Duration;
-use tokio_postgres::NoTls;
 
 use super::super::connection::{normalize_host, ConnectionConfig};
 use super::super::error::{from_duckdb, from_mysql, from_postgres, from_sqlite, DbError, ErrorKind};
@@ -29,7 +28,7 @@ pub async fn connect_postgres(config: &ConnectionConfig) -> Result<tokio_postgre
         host, port, user, db, pass
     );
 
-    let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, tokio_postgres::connect(&conn_str, NoTls)).await {
+    let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref())).await {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             let mut d = from_postgres(e, None);

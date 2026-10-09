@@ -1,6 +1,6 @@
 [package]
 name = "rdsql-desktop"
-version = "1.1.9"
+version = "1.1.10"
 description = "rdSQL Desktop - Modern Database Workspace"
 authors = ["rdSQL Team"]
 edition = "2021"
@@ -21,6 +21,11 @@ tokio = { version = "1.38", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 duckdb = { version = "1.105", features = ["bundled", "chrono"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+# TLS for Postgres (commands::pg_tls) — managed servers like RDS reject
+# unencrypted sessions. rustls to match the convention used elsewhere.
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 # NUMERIC/DECIMAL cell decoding for Postgres query results (commands::query) —
 # Postgres sends NUMERIC in a packed base-10000 binary form, not text, so
 # there's no way to read it as a string without a real decimal type. The

@@ -12,6 +12,11 @@ export interface ParsedConnection {
   database?: string;
   username?: string;
   password?: string;
+  /** From a URL's `?sslmode=` / `?ssl-mode=` / `?ssl=true` (Postgres values
+   *  lower-case, MySQL upper-case — matching the form's SSL Mode options). */
+  sslMode?: string;
+  /** Connection label from a client-exported URL's `?name=` (TablePlus). */
+  name?: string;
   /** Human-readable names of the fields that were populated. */
   appliedKeys: string[];
 }
@@ -117,12 +122,30 @@ export function parseConnectionUrl(url: string): ParsedConnection {
     }
     if (parsed.username) { out.username = decodeURIComponent(parsed.username); out.appliedKeys.push('username'); }
     if (parsed.password) { out.password = decodeURIComponent(parsed.password); out.appliedKeys.push('password'); }
-    const db = parsed.pathname.replace(/^\//, '');
+    const db = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
     if (db) { out.database = db; out.appliedKeys.push('database'); }
+    const sslMode = urlSslMode(parsed.searchParams, isPgFamily);
+    if (sslMode) { out.sslMode = sslMode; out.appliedKeys.push('ssl mode'); }
+    const name = parsed.searchParams.get('name')?.trim();
+    if (name) { out.name = name; out.appliedKeys.push('name'); }
   } catch {
     // Not a valid URL — return empty.
   }
   return out;
+}
+
+/** Map a URL's SSL query params onto the form's SSL Mode values. libpq's
+ *  `sslmode=` and MySQL's `ssl-mode=`/`sslMode=` carry a mode name; the
+ *  boolean `ssl=true` (JDBC/node-postgres/Prisma style) means "require". */
+function urlSslMode(params: URLSearchParams, isPgFamily: boolean): string | undefined {
+  const get = (...keys: string[]) =>
+    keys.map((k) => params.get(k)).find((v) => v != null && v.trim() !== '')?.trim();
+  const mode = get('sslmode', 'ssl-mode', 'sslMode', 'ssl_mode');
+  if (mode) return isPgFamily ? mode.toLowerCase() : mode.toUpperCase().replace(/-/g, '_');
+  const ssl = get('ssl', 'tls')?.toLowerCase();
+  if (ssl === 'true' || ssl === '1') return isPgFamily ? 'require' : 'REQUIRED';
+  if (ssl === 'false' || ssl === '0') return isPgFamily ? 'disable' : 'DISABLED';
+  return undefined;
 }
 
 /** True when `text` looks like a single connection URL rather than an env
@@ -205,4 +228,6 @@ function mergeParsed(dest: ParsedConnection, src: ParsedConnection): void {
   if (!dest.database && src.database) { dest.database = src.database; dest.appliedKeys.push('database'); }
   if (!dest.username && src.username) { dest.username = src.username; dest.appliedKeys.push('username'); }
   if (!dest.password && src.password) { dest.password = src.password; dest.appliedKeys.push('password'); }
+  if (!dest.sslMode && src.sslMode) { dest.sslMode = src.sslMode; dest.appliedKeys.push('ssl mode'); }
+  if (!dest.name && src.name) { dest.name = src.name; dest.appliedKeys.push('name'); }
 }

@@ -322,6 +322,11 @@ MACOS_X64_TARGET   := x86_64-apple-darwin
 # must right-click → Open. But at least it's a warning, not "damaged."
 ENTITLEMENTS := src-tauri/entitlements.plist
 
+# Plain-text readme dropped onto the DMG surface next to rdSQL.app, so users
+# see the Gatekeeper/xattr instructions the moment they open the installer
+# instead of having to find them on the website.
+DMG_README := src-tauri/dmg/README.txt
+
 # Re-packages the DMG with the signed .app so the installer inside the DMG
 # matches the signing (Tauri builds the DMG before this runs, so it still has
 # the unsigned .app otherwise).
@@ -343,6 +348,7 @@ define codesign-app
 			rm -rf "$$staging"; mkdir -p "$$staging"; \
 			cp -R "$$app" "$$staging/"; \
 			ln -sf /Applications "$$staging/Applications"; \
+			cp $(DMG_README) "$$staging/READ ME FIRST.txt"; \
 			rm -f "$$dmg"; \
 			hdiutil create -volname "rdSQL" -srcfolder "$$staging" \
 				-ov -format UDZO "$$dmg" >/dev/null 2>&1 \
