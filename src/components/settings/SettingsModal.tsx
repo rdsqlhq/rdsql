@@ -20,6 +20,7 @@ import {
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { AccountSettingsTab } from './AccountSettingsTab';
 import { Toggle } from './Toggle';
+import { DiagnosticsSection } from './DiagnosticsSection';
 import { useStorageStore } from '../../store/useStorageStore';
 import { useQueryLogStore } from '../../store/useQueryStore';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
@@ -258,6 +259,7 @@ export const SettingsModal: React.FC = () => {
                 >
                   <Trash2 className="w-3.5 h-3.5" /> Clear Finished Transfers
                 </button>
+                <DiagnosticsSection flash={flash} />
               </div>
             )}
 

@@ -21,6 +21,7 @@
     "updater:default",
     "process:allow-restart",
     "deep-link:default",
+    "log:default",
     {
       "identifier": "fs:scope",
       "allow": [

@@ -40,3 +40,5 @@ pub mod backend;
 // Cross-engine database migration wizard (isolated module; all commands are
 // additive). See `migrate::canonical`'s module doc for the design.
 pub mod migrate;
+// Local log file (tauri-plugin-log) + panic hook. See its module doc.
+pub mod app_log;

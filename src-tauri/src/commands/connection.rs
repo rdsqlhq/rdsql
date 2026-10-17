@@ -245,7 +245,7 @@ pub async fn test_connection(config: ConnectionConfig) -> Result<ConnectionTestR
                 Ok(Ok((client, connection))) => {
                     tokio::spawn(async move {
                         if let Err(e) = connection.await {
-                            eprintln!("PostgreSQL connection error: {}", e);
+                            log::warn!("PostgreSQL connection error: {}", e);
                         }
                     });
 
@@ -546,7 +546,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
 
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
-                    eprintln!("PostgreSQL connection error: {}", e);
+                    log::warn!("PostgreSQL connection error: {}", e);
                 }
             });
 

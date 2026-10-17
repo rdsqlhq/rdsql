@@ -15,7 +15,25 @@ use tauri_plugin_deep_link::DeepLinkExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    commands::app_log::install_panic_hook();
+
     tauri::Builder::default()
+        // First, so other plugins' setup logs land in the file too. Our own
+        // crate logs at info; dependencies (drivers, AWS SDK, hyper) only at
+        // warn, or the file fills with connection chatter.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout))
+                .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some(commands::app_log::LOG_FILE_NAME.to_string()),
+                }))
+                .level(log::LevelFilter::Warn)
+                .level_for("rdsql_desktop", log::LevelFilter::Info)
+                .max_file_size(2_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -421,6 +439,10 @@ pub fn run() {
             commands::backend::backend_sync_pull_credentials,
             commands::backend::backend_sync_push_credentials,
             commands::backend::backend_analytics_event,
+            // Local log file. See commands::app_log.
+            commands::app_log::app_log_dir,
+            commands::app_log::app_log_open_dir,
+            commands::app_log::app_log_read,
         ])
         .build(tauri::generate_context!())
         .expect("error while building rdSQL Desktop application")
