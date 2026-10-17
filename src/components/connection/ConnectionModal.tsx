@@ -719,6 +719,10 @@ export const ConnectionModal: React.FC = () => {
                         <input value={cfAccountId} onChange={(e) => setCfAccountId(e.target.value)} placeholder="a1b2c3d4..." className={`${inputClass} font-mono`} />
                       </div>
                       <div>
+                        <label className={labelClass}>API Token</label>
+                        <input type="password" value={cfApiToken} onChange={(e) => setCfApiToken(e.target.value)} className={`${inputClass} font-mono`} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                      </div>
+                      <div>
                         <label className={labelClass}>Database ID / Name</label>
                         <input value={cfDatabaseId} onChange={(e) => setCfDatabaseId(e.target.value)} placeholder="xxxxxxxx-xxxx-xxxx or db-name" className={`${inputClass} font-mono`} />
                       </div>
