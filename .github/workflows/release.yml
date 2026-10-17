@@ -163,8 +163,23 @@ jobs:
               ln -sf /Applications "$staging/Applications"
               cp src-tauri/dmg/README.txt "$staging/READ ME FIRST.txt"
               rm -f "$dmg"
-              hdiutil create -volname "rdSQL" -srcfolder "$staging" \
-                -ov -format UDZO "$dmg" >/dev/null 2>&1 \
+              # hdiutil on GitHub's macOS runners intermittently fails with
+              # "Resource busy" (a volume left mounted by tauri's own DMG
+              # step, or XProtect scanning the image). Detach any leftover
+              # rdSQL volume and retry; print hdiutil's own error on failure.
+              ok=""
+              for attempt in 1 2 3 4 5; do
+                for vol in /Volumes/rdSQL*; do
+                  [ -d "$vol" ] && hdiutil detach "$vol" -force >/dev/null 2>&1 || true
+                done
+                if out=$(hdiutil create -volname "rdSQL" -srcfolder "$staging" -ov -format UDZO "$dmg" 2>&1); then
+                  ok=1
+                  break
+                fi
+                echo "  ⚠ hdiutil attempt $attempt failed: $out"
+                sleep $((attempt * 5))
+              done
+              [ -n "$ok" ] \
                 && echo "  ✓ DMG re-packaged with README ($(basename "$dmg"))" \
                 || { echo "  ✗ DMG re-package failed"; exit 1; }
               rm -rf "$staging"
