@@ -1,6 +1,6 @@
 {
   "name": "rdsql-desktop",
-  "version": "1.1.10",
+  "version": "1.1.11",
   "description": "Modern Database Workspace - Native Desktop Application powered by Tauri v2 + React 19",
   "private": true,
   "type": "module",
@@ -19,7 +19,7 @@
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-fs": "^2.2.0",
-    "@tauri-apps/plugin-log": "^2.7.0",
+    "@tauri-apps/plugin-log": "^2.9.2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.2.0",
     "@tauri-apps/plugin-updater": "^2.10.1",
