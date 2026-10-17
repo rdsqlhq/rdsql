@@ -62,7 +62,7 @@ pub async fn connect(config: &ConnectionConfig) -> Result<(tokio_postgres::Clien
     };
     let task = tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL connection error (migration target): {}", e);
+            log::warn!("PostgreSQL connection error (migration target): {}", e);
         }
     });
     Ok((client, task))

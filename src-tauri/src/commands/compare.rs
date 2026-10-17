@@ -744,7 +744,7 @@ async fn fetch_table_snapshot_postgres(
     };
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL connection error: {}", e);
+            log::warn!("PostgreSQL connection error: {}", e);
         }
     });
 
@@ -1596,7 +1596,7 @@ async fn run_ddl_postgres(config: &ConnectionConfig, sql: &str) -> Result<(), St
     };
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL connection error: {}", e);
+            log::warn!("PostgreSQL connection error: {}", e);
         }
     });
 

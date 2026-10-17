@@ -552,7 +552,7 @@ pub async fn s3_test_connection(config: S3Config) -> Result<TestResult, String> 
     // include both attempts' details in the final failure message.
     let head_detail = match &head {
         Err(e) => {
-            eprintln!("[s3_test_connection] head_bucket failed — {:?}", e);
+            log::warn!("[s3_test_connection] head_bucket failed — {:?}", e);
             describe_sdk_error(e)
         }
         _ => String::new(),
@@ -579,7 +579,7 @@ pub async fn s3_test_connection(config: S3Config) -> Result<TestResult, String> 
         Err(err) => {
             // Log the FULL raw error to the dev console so we can diagnose
             // provider quirks (R2/MinIO/B2) that the SDK collapses in Display.
-            eprintln!("[s3_test_connection] list failed — {:?}", err);
+            log::warn!("[s3_test_connection] list failed — {:?}", err);
             let meta = err.meta();
             let code = meta.code().unwrap_or("");
             let list_detail = describe_sdk_error(&err);
@@ -663,7 +663,7 @@ pub async fn s3_list_objects(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[s3_list_objects] failed — {:?}", e);
+            log::warn!("[s3_list_objects] failed — {:?}", e);
             let detail = describe_sdk_error(&e);
             let kind = classify_message(&detail, "list");
             let storage_err = StorageError::new(kind, format!("Failed to list objects: {}", detail))

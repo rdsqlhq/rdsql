@@ -1,5 +1,6 @@
 import React from 'react';
 import { AlertTriangle, RefreshCw, Copy, Check } from 'lucide-react';
+import { logUncaughtError } from '../../core/errors/errorLog';
 
 interface Props {
   children: React.ReactNode;
@@ -29,6 +30,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     // eslint-disable-next-line no-console
     console.error('Uncaught render error:', error, info.componentStack);
+    logUncaughtError(error, 'render', info.componentStack ?? undefined);
   }
 
   render() {

@@ -102,6 +102,12 @@ russh = "0.62"
 # this crate's own `mongodb::bson` re-export — no separate `bson` dependency.
 mongodb = "3.8"
 
+# Local log file (`commands::app_log`). GUI builds have no console on
+# Windows/macOS, so stderr output is lost; tauri-plugin-log writes a rotating
+# file in the OS app-log dir instead.
+log = "0.4"
+tauri-plugin-log = "2"
+
 # The updater only makes sense where we ship installers. Gating it keeps mobile
 # targets buildable, since the plugin has no Android/iOS implementation.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

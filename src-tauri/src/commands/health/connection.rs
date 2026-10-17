@@ -46,7 +46,7 @@ pub async fn connect_postgres(config: &ConnectionConfig) -> Result<tokio_postgre
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL connection error: {}", e);
+            log::warn!("PostgreSQL connection error: {}", e);
         }
     });
 

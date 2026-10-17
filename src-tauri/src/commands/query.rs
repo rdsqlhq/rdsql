@@ -470,7 +470,7 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
 
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
-                    eprintln!("PostgreSQL connection error: {}", e);
+                    log::warn!("PostgreSQL connection error: {}", e);
                 }
             });
 
