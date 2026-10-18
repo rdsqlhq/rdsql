@@ -74,6 +74,9 @@ interface WorkspaceState {
   setActiveBottomTab: (tab: 'result' | 'messages' | 'explain' | 'history') => void;
   setUsersModalOpen: (open: boolean) => void;
   setAboutModalOpen: (open: boolean) => void;
+  /** ⌘K command palette (session-only). */
+  isCommandPaletteOpen: boolean;
+  setCommandPaletteOpen: (open: boolean) => void;
   setSettingsModalOpen: (open: boolean, initialTab?: string) => void;
   openEncryptedConnectionsModal: (
     mode?: 'export' | 'import',
@@ -129,6 +132,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
       setUsersModalOpen: (open) => set({ isUsersModalOpen: open }),
       setAboutModalOpen: (open) => set({ isAboutModalOpen: open }),
+      isCommandPaletteOpen: false,
+      setCommandPaletteOpen: (open) => set({ isCommandPaletteOpen: open }),
       setSettingsModalOpen: (open, initialTab) =>
         set({ isSettingsModalOpen: open, settingsModalInitialTab: initialTab }),
       openEncryptedConnectionsModal: (mode = 'export', singleConn = null, initialPath) =>

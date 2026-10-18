@@ -1,6 +1,6 @@
 pub mod commands;
 
-use commands::query::QueryRegistry;
+use commands::query::{QueryRegistry, SessionRegistry};
 use commands::s3::TransferRegistry;
 use commands::backend::PendingLogin;
 use commands::migrate::MigrationRegistry;
@@ -40,6 +40,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_deep_link::init())
         .manage(Arc::new(Mutex::new(HashMap::new())) as QueryRegistry)
+        // Open database sessions that span several IPC calls (restore).
+        .manage(SessionRegistry(Arc::new(Mutex::new(HashMap::new()))))
         // Transfer registry for cancellable S3 uploads/downloads. Same shape as
         // the query registry; lives independently so the two never collide.
         .manage(TransferRegistry(Arc::new(Mutex::new(HashMap::new()))))
@@ -149,6 +151,15 @@ pub fn run() {
                 .accelerator("CmdOrCtrl+O")
                 .build(app)?;
 
+            // Cmd+W closes the active tab (asking first if it has unsaved
+            // SQL); closing the whole window moves to Shift+Cmd+W.
+            let close_tab = MenuItemBuilder::with_id("close_tab", "Close Tab")
+                .accelerator("CmdOrCtrl+W")
+                .build(app)?;
+            let close_window = MenuItemBuilder::with_id("close_window", "Close Window")
+                .accelerator("CmdOrCtrl+Shift+W")
+                .build(app)?;
+
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&new_conn)
                 .item(&open_sql)
@@ -157,7 +168,8 @@ pub fn run() {
                 .item(&export_menu)
                 .item(&import_menu)
                 .separator()
-                .item(&PredefinedMenuItem::close_window(app, None)?)
+                .item(&close_tab)
+                .item(&close_window)
                 .build()?;
 
             // Build Edit Submenu
@@ -288,6 +300,14 @@ pub fn run() {
                 "open_sql_file" => {
                     let _ = app.emit("menu_action", "open_sql_file");
                 }
+                "close_tab" => {
+                    let _ = app.emit("menu_action", "close_tab");
+                }
+                "close_window" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.close();
+                    }
+                }
                 "export_csv" => {
                     let _ = app.emit("menu_action", "export_csv");
                 }
@@ -342,6 +362,10 @@ pub fn run() {
             commands::connection::fetch_schema_tree,
             commands::ssh_tunnel::test_ssh_connection,
             commands::query::execute_query,
+            commands::query::execute_batch,
+            commands::query::session_open,
+            commands::query::session_execute,
+            commands::query::session_close,
             commands::query::cancel_query,
             commands::transfer::export_table_data,
             commands::storage::save_secure_credential,

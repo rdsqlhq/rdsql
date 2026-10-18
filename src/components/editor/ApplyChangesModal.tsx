@@ -10,6 +10,8 @@ export interface PendingChange {
   sql: string;
   /** Short human label, e.g. "users · row 3" — shown next to the kind badge. */
   label?: string;
+  /** See `GridChange.guardSql`. */
+  guardSql?: string;
 }
 
 interface ApplyChangesModalProps {

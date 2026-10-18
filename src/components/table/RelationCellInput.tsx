@@ -4,15 +4,9 @@ import { Link2, Search, X } from 'lucide-react';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { DatabaseConnection } from '../../core/domain/types';
 import { CELL_INPUT_HEIGHT_CLASS } from './TypedCellInput';
+import { quoteIdent } from '../../core/sql/ident';
+import { quoteSqlString } from '../../core/backup/backupSql';
 
-function quoteIdent(engine: string, name: string): string {
-  if (engine === 'mysql') return `\`${name.replace(/`/g, '``')}\``;
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
-function sqlLiteralText(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
 
 interface RelationOption {
   pk: string;
@@ -126,7 +120,7 @@ export const RelationCellInput: React.FC<RelationCellInputProps> = ({
         let sql = `SELECT ${selectCols} FROM ${targetRef}`;
         const needle = query.trim();
         if (needle) {
-          const literal = sqlLiteralText(`%${needle}%`);
+          const literal = quoteSqlString(`%${needle}%`, connection.engine);
           const clauses = [`${castExpr(targetPkColumn)} LIKE ${literal}`];
           if (targetLabelColumn) clauses.push(`${castExpr(targetLabelColumn)} LIKE ${literal}`);
           sql += ` WHERE ${clauses.join(' OR ')}`;

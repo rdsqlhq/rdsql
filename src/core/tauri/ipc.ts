@@ -168,11 +168,33 @@ function logCommand(
   durationMs: number,
   status: 'success' | 'error',
   errorMessage?: string,
-  rowCount?: number
+  rowCount?: number,
+  result?: unknown
 ) {
   const meta = (args as { __meta?: ExecuteQueryMeta } | undefined)?.__meta;
   if (meta?.skipLog) return;
   const source: QuerySource = meta?.source ?? 'system';
+
+  if (command === 'execute_batch') {
+    const request = (args as { request?: { config?: ConnConfig; statements?: string[] } } | undefined)?.request;
+    if (Array.isArray(result)) {
+      // One log entry per statement, with its own timing and outcome.
+      for (const item of result as { statement: string; error?: string | null; duration_ms: number; result?: unknown }[]) {
+        pushLog(
+          item.statement,
+          request?.config,
+          item.duration_ms,
+          item.error ? 'error' : 'success',
+          source,
+          item.error ?? undefined,
+          item.result ? extractRowCount(item.result) : undefined
+        );
+      }
+    } else if (request?.statements?.length) {
+      pushLog(request.statements.join('\n'), request.config, durationMs, status, source, errorMessage, rowCount);
+    }
+    return;
+  }
 
   if (command === 'execute_query') {
     const a = (args ?? {}) as ExecuteQueryArgs;
@@ -235,7 +257,7 @@ async function doInvoke<T>(command: string, args?: Record<string, unknown>): Pro
       // Single interception point: log EVERY database-hitting command so the
       // SQL log captures all queries (COUNT, pagination, ANALYZE, GRANT,
       // schema introspection, etc.) regardless of which component fired them.
-      logCommand(command, args, Date.now() - startedAt, 'success', undefined, extractRowCount(result));
+      logCommand(command, args, Date.now() - startedAt, 'success', undefined, extractRowCount(result), result);
       return result;
     }
   } catch (err: any) {
@@ -283,6 +305,16 @@ function fallbackInvoke<T>(command: string, args?: Record<string, unknown>): T {
         affected_rows: 1,
         status_message: 'Executed in browser simulation',
       } as unknown as T;
+    case 'execute_batch': {
+      const statements = ((args as { request?: { statements?: string[] } })?.request?.statements) ?? [];
+      return statements.map((statement) => ({
+        statement,
+        result: fallbackInvoke('execute_query', args),
+        error: null,
+        truncated: false,
+        duration_ms: 2,
+      })) as unknown as T;
+    }
     case 'get_database_overview':
       return {
         engine: 'browser',

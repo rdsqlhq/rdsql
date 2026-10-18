@@ -1,11 +1,17 @@
 import { create } from 'zustand';
-import { QueryTab, QueryResultData, QueryResultSet, ErdSchemaContext, ObjectEditorContext } from '../core/domain/types';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import { QueryTab, QueryResultSet, ErdSchemaContext, ObjectEditorContext, DatabaseConnection } from '../core/domain/types';
 import { useConnectionStore } from './useConnectionStore';
 import { useWorkspaceStore } from './useWorkspaceStore';
 import { useStorageStore } from './useStorageStore';
 import { safeInvoke } from '../core/tauri/ipc';
 import { selectPreviewSql, resolveTargetDatabase, detectEditableTable } from '../core/sql/ident';
 import { splitSqlStatements } from '../core/backup/backupSql';
+import { sqlDialectFor } from '../core/sql/splitStatements';
+import type { BatchItem } from '../core/sql/batch';
+import { engineFamily } from '../core/connection/engines';
+import { useSettingsStore } from './useSettingsStore';
+import { useToastStore } from './useToastStore';
 
 interface TabState {
   tabs: QueryTab[];
@@ -63,7 +69,7 @@ interface TabState {
    *  Clears any stale results since they belonged to the old connection. */
   setTabConnection: (id: string, connectionId: string) => void;
   /** Records the on-disk path a `sql_editor` tab was saved to (Save/Save As),
-   *  and renames the tab to the file's base name so the tab bar reflects it. */
+   *  renames the tab to the file's base name, and clears its unsaved mark. */
   setTabFilePath: (id: string, filePath: string, title: string) => void;
   /** Set the schema/database a SQL editor tab targets (toolbar picker).
    *  Clears stale results since the prior ones ran against a different db. */
@@ -78,7 +84,69 @@ interface TabState {
   runSingleStatement: (id: string, statement: string) => Promise<void>;
 }
 
-export const useTabStore = create<TabState>((set, get) => ({
+/** Builds the `execute_batch` request for a tab. Row limit and timeout come
+ *  from Settings and apply to SQL editor tabs only; table-data tabs page
+ *  their own rows. */
+function batchRequestFor(
+  tab: QueryTab,
+  conn: DatabaseConnection,
+  config: DatabaseConnection,
+  groupOrSchema: string | undefined,
+  statements: string[],
+) {
+  const isEditor = tab.tabType === 'sql_editor';
+  const { rowLimit, execTimeoutSec } = useSettingsStore.getState();
+  return {
+    config,
+    statements,
+    // Postgres keeps the configured database and selects the schema with
+    // search_path; MySQL already switched database via `config.database`.
+    schema: engineFamily(conn.engine) === 'postgres' ? groupOrSchema : undefined,
+    rowLimit: isEditor && rowLimit > 0 ? rowLimit : undefined,
+    timeoutSec: isEditor && execTimeoutSec > 0 ? execTimeoutSec : undefined,
+  };
+}
+
+function resultSetFromItem(tabId: string, index: number, item: BatchItem, rowLimit?: number): QueryResultSet {
+  if (item.error) {
+    return { id: `rs_${tabId}_${index}`, statement: item.statement, status: 'error', error: item.error };
+  }
+  return {
+    id: `rs_${tabId}_${index}`,
+    statement: item.statement,
+    status: 'success',
+    result: item.result ?? undefined,
+    editableTable: detectEditableTable(item.statement),
+    truncatedAt: item.truncated ? rowLimit : undefined,
+  };
+}
+
+const TXN_START = /^(BEGIN(\s+(TRANSACTION|TRAN|WORK))?|START\s+TRANSACTION)\b/i;
+const TXN_END = /^(COMMIT|ROLLBACK|END)\b(?!\s+TO\b)/i;
+
+/** A run ends by closing its connection, so a transaction still open at that
+ *  point is rolled back by the server. Say so instead of letting the user
+ *  think the changes were kept. */
+function warnIfTransactionLeftOpen(resultSets: QueryResultSet[]) {
+  let open = false;
+  for (const rs of resultSets) {
+    if (rs.status !== 'success') break;
+    const stmt = rs.statement.trim().replace(/;$/, '');
+    if (TXN_START.test(stmt)) open = true;
+    else if (TXN_END.test(stmt)) open = false;
+  }
+  if (!open) return;
+  const failed = resultSets.some((rs) => rs.status === 'error');
+  useToastStore.getState().push({
+    severity: 'warning',
+    title: 'Transaction rolled back',
+    message: failed
+      ? 'A statement failed inside a transaction, so nothing from that transaction was saved.'
+      : 'The run ended without COMMIT, so the open transaction was rolled back. Add COMMIT at the end to keep the changes.',
+  });
+}
+
+export const useTabStore = create<TabState>()(persist((set, get) => ({
   tabs: [
     {
       id: 'tab_welcome',
@@ -385,7 +453,12 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   closeTab: (id) => {
     const state = get();
-    if (state.tabs.length <= 1) return;
+    if (!state.tabs.some((t) => t.id === id)) return;
+    // Closing the last tab leaves a fresh empty query, like Close All.
+    if (state.tabs.length <= 1) {
+      get().closeAllTabs();
+      return;
+    }
     const filtered = state.tabs.filter((t) => t.id !== id);
     const newActiveId = state.activeTabId === id ? filtered[filtered.length - 1].id : state.activeTabId;
     set({ tabs: filtered, activeTabId: newActiveId });
@@ -488,7 +561,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   setTabFilePath: (id, filePath, title) => {
     set((state) => ({
-      tabs: state.tabs.map((t) => (t.id === id ? { ...t, filePath, title } : t)),
+      tabs: state.tabs.map((t) => (t.id === id ? { ...t, filePath, title, isDirty: false } : t)),
     }));
   },
 
@@ -570,14 +643,13 @@ export const useTabStore = create<TabState>((set, get) => ({
         ? { ...activeConn, database: targetDb }
         : activeConn;
 
-    // The backend executes ONE statement per call. Split the buffer on top-level
-    // semicolons (respecting quoted strings) and run each in sequence, collecting
-    // one QueryResultSet per statement. A single-statement buffer produces a
-    // single-element list — identical UX to the old single-shot path.
-    const statements = splitSqlStatements(sql);
+    // Split the buffer with the connection's dialect rules, then run every
+    // statement in order on ONE backend connection, so BEGIN/COMMIT, SET,
+    // temp tables and USE carry from one statement to the next.
+    const statements = splitSqlStatements(sql, sqlDialectFor(activeConn.engine));
+    const request = batchRequestFor(tab, activeConn, config, groupOrSchema, statements);
 
-    // A single backend query id drives the Stop button; we track the currently
-    // running one so cancel lands on the right in-flight request.
+    // One backend query id drives the Stop button for the whole run.
     const queryId = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
       ? crypto.randomUUID()
       : `q_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -591,48 +663,30 @@ export const useTabStore = create<TabState>((set, get) => ({
     const resultSets: QueryResultSet[] = [];
     let firstError: string | undefined;
 
-    for (const stmtRaw of statements) {
-      const stmt = stmtRaw.trim();
-      if (!stmt) continue;
-
-      const stmtQueryId = `q_${queryId}_${resultSets.length}`;
-      // Publish the active query id so Stop targets this statement.
-      set((state) => ({
-        tabs: state.tabs.map((t) => (t.id === id ? { ...t, currentQueryId: stmtQueryId } : t)),
-      }));
-
-      try {
-        const res = await safeInvoke<QueryResultData>('execute_query', {
-          request: { config, sql: stmt },
-          queryId: stmtQueryId,
-          // The IPC layer logs this once with the correct source — no manual
-          // addLog needed here.
-          __meta: { source: 'editor' },
-        });
-
-        resultSets.push({
-          id: `rs_${id}_${resultSets.length}`,
-          statement: stmt,
-          status: 'success',
-          result: res,
-          editableTable: detectEditableTable(stmt),
-        });
-      } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        // (Logged by the IPC layer with source: 'editor'.)
-
-        if (!firstError) firstError = errMsg;
-        resultSets.push({
-          id: `rs_${id}_${resultSets.length}`,
-          statement: stmt,
-          status: 'error',
-          error: errMsg,
-        });
-        // Stop the batch on the first error so the user sees what broke instead
-        // of a cascade of follow-on failures.
-        break;
+    try {
+      const items = await safeInvoke<BatchItem[]>('execute_batch', {
+        request,
+        queryId,
+        // The IPC layer logs each statement with this source.
+        __meta: { source: 'editor' },
+      });
+      for (const item of items) {
+        resultSets.push(resultSetFromItem(id, resultSets.length, item, request.rowLimit));
+        if (item.error && !firstError) firstError = item.error;
       }
+    } catch (err: any) {
+      // The run failed as a whole: could not connect, or the user pressed Stop.
+      const errMsg = err?.message || String(err);
+      firstError = errMsg;
+      resultSets.push({
+        id: `rs_${id}_0`,
+        statement: statements[0] ?? sql,
+        status: 'error',
+        error: errMsg,
+      });
     }
+
+    warnIfTransactionLeftOpen(resultSets);
 
     // Keep `result` / `error` in sync with the first set so legacy consumers
     // (e.g. a tab with a single statement, or code reading tab.result directly)
@@ -644,7 +698,6 @@ export const useTabStore = create<TabState>((set, get) => ({
           ? {
               ...t,
               executing: false,
-              isDirty: false,
               currentQueryId: undefined,
               resultSets,
               result: firstSet?.result,
@@ -689,19 +742,20 @@ export const useTabStore = create<TabState>((set, get) => ({
       : `q_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
     try {
-      const res = await safeInvoke<QueryResultData>('execute_query', {
-        request: { config, sql: stmt },
+      const request = batchRequestFor(tab, activeConn, config, groupOrSchema, [stmt]);
+      const [item] = await safeInvoke<BatchItem[]>('execute_batch', {
+        request,
         queryId,
-        // Logged once by the IPC layer with source: 'editor'.
+        // Logged by the IPC layer with source: 'editor'.
         __meta: { source: 'editor' },
       });
+      if (!item) return;
+      if (item.error) throw new Error(item.error);
 
       const updated: QueryResultSet = {
+        ...resultSetFromItem(id, 0, item, request.rowLimit),
         id: `rs_${id}_refresh_${Date.now()}`,
         statement: stmt,
-        status: 'success',
-        result: res,
-        editableTable: detectEditableTable(stmt),
       };
       // Replace the matching set by statement text. If none matches (statement
       // was edited inline since the last run), append it.
@@ -737,5 +791,25 @@ export const useTabStore = create<TabState>((set, get) => ({
         }),
       }));
     }
+  },
+}), {
+  // SQL editor tabs (text, connection, file) survive a restart, so quitting
+  // or Cmd+W on the window never silently drops unsaved queries. Other tab
+  // kinds hold live results or context that is cheap to reopen.
+  name: 'rdsql_tabs_v1',
+  storage: createJSONStorage(() => localStorage),
+  partialize: (state) => {
+    const tabs = state.tabs
+      .filter((t) => t.tabType === 'sql_editor')
+      .map(({ id, title, sql, tabType, connectionId, schemaName, filePath, isDirty }) => ({
+        id, title, sql, tabType, connectionId, schemaName, filePath, isDirty,
+      }));
+    const activeTabId = tabs.some((t) => t.id === state.activeTabId) ? state.activeTabId : tabs[0]?.id;
+    return { tabs, activeTabId } as Partial<TabState>;
+  },
+  merge: (persisted, current) => {
+    const p = persisted as Partial<TabState> | undefined;
+    if (!p?.tabs?.length) return current;
+    return { ...current, tabs: p.tabs, activeTabId: p.activeTabId ?? p.tabs[0].id };
   },
 }));

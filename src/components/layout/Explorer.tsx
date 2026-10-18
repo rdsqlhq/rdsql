@@ -78,6 +78,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import { useConnectionStore } from '../../store/useConnectionStore';
 import { useTabStore } from '../../store/useTabStore';
+import { confirmAsync } from '../../store/useConfirmStore';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useToastStore, pushDedupedToast } from '../../store/useToastStore';
 import { useHealthStore } from '../../store/useHealthStore';
@@ -2484,9 +2485,13 @@ export const Explorer: React.FC = () => {
                         <Pencil className="w-3 h-3" />
                       </button>
                       <button
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation();
-                          if (confirm(`Delete storage connection "${sConn.name}"? This does not delete any stored objects.`)) {
+                          if (await confirmAsync({
+                            title: `Delete storage connection "${sConn.name}"?`,
+                            message: 'This does not delete any stored objects.',
+                            confirmLabel: 'Delete',
+                          })) {
                             deleteStorageConnection(sConn.id);
                           }
                         }}
@@ -4011,11 +4016,16 @@ export const Explorer: React.FC = () => {
           <div className="h-px bg-[#1e293b] my-1" />
 
           <button
-            onClick={() => {
-              if (confirm(`Delete storage connection "${storageContextMenu.conn.name}"? This does not delete any stored objects.`)) {
-                deleteStorageConnection(storageContextMenu.conn.id);
-              }
+            onClick={async () => {
+              const conn = storageContextMenu.conn;
               setStorageContextMenu(null);
+              if (await confirmAsync({
+                title: `Delete storage connection "${conn.name}"?`,
+                message: 'This does not delete any stored objects.',
+                confirmLabel: 'Delete',
+              })) {
+                deleteStorageConnection(conn.id);
+              }
             }}
             className="w-full text-left px-3 py-1.5 hover:bg-[#141e33] flex items-center gap-2 font-medium text-red-400"
           >

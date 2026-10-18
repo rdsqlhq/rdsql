@@ -31,6 +31,7 @@ import { ModelCombobox } from '../common/ModelCombobox';
 import { PROVIDER_PRESETS, PRESET_BY_ID } from '../../core/ai/providers';
 import { AIError, isAIConfigured, type AIProvider, type ModelInfo } from '../../core/ai/types';
 import { testConnection, fetchModels } from '../../core/ai/client';
+import { confirmAsync } from '../../store/useConfirmStore';
 
 type SettingsTab = 'account' | 'query' | 'storage' | 'log' | 'data' | 'security' | 'ai';
 
@@ -149,7 +150,7 @@ export const SettingsModal: React.FC = () => {
                 </h3>
                 <div className="grid grid-cols-2 gap-4 text-xs">
                   <LabeledNumber
-                    label="Default Row Limit"
+                    label="Row Limit"
                     value={rowLimit}
                     onChange={(n) => { setRowLimit(n); flash('Row limit saved'); }}
                   />
@@ -159,8 +160,9 @@ export const SettingsModal: React.FC = () => {
                     onChange={(n) => { setExecTimeoutSec(n); flash('Timeout saved'); }}
                   />
                 </div>
-                <p className="text-[10px] text-slate-600">
-                  Note: these are stored preferences. Enforcing them at the executor is on the roadmap.
+                <p className="text-[10px] text-slate-500">
+                  Applies to queries run from the SQL editor. The row limit is the most rows kept per result; the
+                  timeout stops a statement that runs longer. Set either to 0 to turn it off.
                 </p>
                 <Toggle
                   label="Show system schemas in Explorer"
@@ -240,8 +242,8 @@ export const SettingsModal: React.FC = () => {
                   <span className="font-mono text-slate-300">{logCount} / 200</span>
                 </div>
                 <button
-                  onClick={() => {
-                    if (confirm('Clear the SQL log? This cannot be undone.')) {
+                  onClick={async () => {
+                    if (await confirmAsync({ title: 'Clear the SQL log?', message: 'This cannot be undone.', confirmLabel: 'Clear' })) {
                       clearLogs();
                       flash('SQL log cleared');
                     }

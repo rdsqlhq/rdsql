@@ -1,3 +1,5 @@
+import { EXPORT_EVENT, type ExportEventDetail, type ExportFormat } from '../../core/export/resultExport';
+import { CLOSE_ACTIVE_TAB_EVENT } from './EditorTabs';
 import React, { useState, useEffect } from 'react';
 import { PanelBottomOpen, PanelLeftOpen, Table as TableIcon } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
@@ -20,7 +22,7 @@ import { TableDataView } from '../table/TableDataView';
 import { VisualERDCanvas } from '../erd/VisualERDCanvas';
 import { MigrationStudio } from '../migration/MigrationStudio';
 import { DatabaseMigrationWizard } from '../migrate/DatabaseMigrationWizard';
-import { PluginMarketplace } from '../plugins/PluginMarketplace';
+import { IntegrationsView } from '../plugins/IntegrationsView';
 import { StorageBrowser } from '../storage/StorageBrowser';
 import { RedisBrowser } from '../redis/RedisBrowser';
 import { MongoDocumentBrowser } from '../mongo/MongoDocumentBrowser';
@@ -28,6 +30,8 @@ import { MongoDocumentBrowser } from '../mongo/MongoDocumentBrowser';
 import { SettingsModal } from '../settings/SettingsModal';
 import { DatabaseHealthView } from '../health/DatabaseHealthView';
 import { ToastContainer } from '../common/ToastContainer';
+import { ConfirmHost } from '../common/ConfirmHost';
+import { CommandPalette } from './CommandPalette';
 
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useTabStore } from '../../store/useTabStore';
@@ -155,6 +159,24 @@ export const MainLayout: React.FC = () => {
               pushToast({ severity: 'error', title: 'Could not open SQL file', message: err?.message || String(err) });
             });
           break;
+        case 'close_tab':
+          window.dispatchEvent(new Event(CLOSE_ACTIVE_TAB_EVENT));
+          break;
+        case 'export_csv':
+        case 'export_json':
+        case 'export_sql': {
+          // The active tab's view (table data or SQL results) takes it.
+          const detail: ExportEventDetail = { format: event.payload.slice('export_'.length) as ExportFormat, handled: false };
+          window.dispatchEvent(new CustomEvent(EXPORT_EVENT, { detail }));
+          if (!detail.handled) {
+            pushToast({
+              severity: 'info',
+              title: 'Nothing to export',
+              message: 'Open a table, or run a query in the SQL editor, then export again.',
+            });
+          }
+          break;
+        }
         case 'toggle_explorer':
           toggleSidebar();
           break;
@@ -467,8 +489,8 @@ export const MainLayout: React.FC = () => {
           <DatabaseMigrationWizard />
         ) : activeView === 'health' ? (
           <DatabaseHealthView />
-        ) : activeView === 'plugins' ? (
-          <PluginMarketplace />
+        ) : activeView === 'integrations' ? (
+          <IntegrationsView />
         ) : null}
       </div>
 
@@ -517,6 +539,8 @@ export const MainLayout: React.FC = () => {
 
       {/* Global non-intrusive toast notifications */}
       <ToastContainer />
+      <ConfirmHost />
+      <CommandPalette />
     </div>
   );
 };

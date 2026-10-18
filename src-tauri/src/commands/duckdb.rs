@@ -170,8 +170,14 @@ pub fn duckdb_value_to_json(val: duckdb::types::Value) -> serde_json::Value {
 
 /// Execute a SQL statement against a DuckDB file and return the result set.
 pub fn run_duckdb_query(config: &ConnectionConfig, sql: &str) -> Result<QueryResult, String> {
-    let start = Instant::now();
     let conn = open(config)?;
+    run_duckdb_on(&conn, config, sql)
+}
+
+/// Runs one statement on an already-open connection, so a multi-statement
+/// editor run can keep transactions and session state across statements.
+pub fn run_duckdb_on(conn: &Connection, config: &ConnectionConfig, sql: &str) -> Result<QueryResult, String> {
+    let start = Instant::now();
 
     if is_read_query(sql) {
         let mut stmt = conn.prepare(sql).map_err(|e| from_duckdb(e, Some(sql)).to_json_string())?;

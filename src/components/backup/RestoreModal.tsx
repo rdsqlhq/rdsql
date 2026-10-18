@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs';
 import { X, HardDriveUpload, Loader2, CheckCircle2, AlertTriangle, FileText, FolderOpen, Cloud, Copy, Check } from 'lucide-react';
@@ -6,6 +6,7 @@ import { DatabaseConnection } from '../../core/domain/types';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { splitSqlStatements, stripSchemaQualifiers } from '../../core/backup/backupSql';
+import { sqlDialectFor } from '../../core/sql/splitStatements';
 import { buildRestorePlan, type RestorePlanItem, type RestoreStatementCategory } from '../../core/backup/restorePlanner';
 import { describeFsError } from '../../core/utils/fsErrors';
 import { copyToClipboard } from '../../core/utils/clipboard';
@@ -62,6 +63,18 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
   /** Set by `pauseHere` to a closure that re-enters the plan at the
    *  statement that failed. Lives only as long as this modal instance. */
   const resumeRef = useRef<(() => Promise<void>) | null>(null);
+  /** One backend session for the whole restore, so session settings such as
+   *  `SET FOREIGN_KEY_CHECKS = 0` apply to every statement after them. Kept
+   *  open while paused so Resume continues on the same connection. */
+  const sessionRef = useRef<string | null>(null);
+
+  const closeSession = async () => {
+    const id = sessionRef.current;
+    sessionRef.current = null;
+    if (id) await safeInvoke('session_close', { sessionId: id }).catch(() => {});
+  };
+
+  useEffect(() => () => { void closeSession(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const appendLog = (text: string, kind: LogKind = 'info') => {
     logLinesRef.current = [...logLinesRef.current, { text, kind }];
@@ -101,7 +114,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     }
     try {
       const content = await readTextFile(path);
-      const stmts = splitSqlStatements(content);
+      const stmts = splitSqlStatements(content, sqlDialectFor(connection.engine));
       setRawContent(content);
       setFilePath(path);
       setStatements(stmts);
@@ -157,7 +170,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
       }
       await remove(tmpPath).catch(() => {});
 
-      const stmts = splitSqlStatements(content);
+      const stmts = splitSqlStatements(content, sqlDialectFor(connection.engine));
       setRawContent(content);
       setFilePath(`${conn.bucket}/${obj.key}`);
       setStatements(stmts);
@@ -231,9 +244,38 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
       setRunning(false);
     };
 
+    const execute = (sql: string, i: number) =>
+      safeInvoke('session_execute', {
+        sessionId: sessionRef.current,
+        sql,
+        queryId: `restore_${i}_${Date.now()}`,
+        __meta: { source: 'restore' },
+      });
+
+    /** Opens the session if there is none (first run, or it was dropped while
+     *  paused). A new session re-runs the plan's FK-disable statements first,
+     *  since those only last for the connection they ran on. */
+    const ensureSession = async (fromIndex: number) => {
+      if (sessionRef.current) return;
+      sessionRef.current = await safeInvoke<string>('session_open', { config: connection });
+      if (fromIndex === 0) return;
+      for (const [i, item] of plan.items.entries()) {
+        if (i < fromIndex && item.category === 'fk_disable') await execute(item.statement, i);
+      }
+    };
+
     const runPlan = async (fromIndex: number) => {
       setRunning(true);
       setPaused(false);
+
+      try {
+        await ensureSession(fromIndex);
+      } catch (err: any) {
+        errorBox.any = true;
+        appendLog(`Could not connect: ${err?.message || String(err)}`, 'error');
+        await pauseHere(fromIndex);
+        return;
+      }
 
       for (let i = fromIndex; i < plan.items.length; i++) {
         const item = plan.items[i];
@@ -241,16 +283,15 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
 
         const stmt = item.statement;
         try {
-          await safeInvoke('execute_query', {
-            request: { config: connection, sql: stmt },
-            queryId: `restore_${i}_${Date.now()}`,
-            __meta: { source: 'restore' },
-          });
+          await ensureSession(i);
+          await execute(stmt, i);
           appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: OK`, 'success');
         } catch (err: any) {
           errorBox.any = true;
           const msg = err?.message || String(err);
           appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: FAILED — ${msg}`, 'error');
+          // A lost connection ends the session; Resume opens a new one.
+          if (/session has ended|connection/i.test(msg)) await closeSession();
           if (stopOnError) {
             await pauseHere(i);
             return;
@@ -259,6 +300,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
         setProgress(i + 1);
       }
 
+      await closeSession();
       setHadError(errorBox.any);
       setCurrentPhase('');
       if (!errorBox.any) appendLog('Restore complete.', 'success');
