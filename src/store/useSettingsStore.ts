@@ -58,10 +58,8 @@ interface SettingsState {
   sqlLogFullText: boolean;
 
   /** Opt-in, anonymous, aggregate usage analytics (e.g. which DB/S3 engines
-   *  people connect to) — currently defaulted ON for testing (see the
-   *  website's privacy copy, which still says "off by default" — these are
-   *  now out of sync and should be reconciled before a real release).
-   *  See src/core/analytics/. Checked
+   *  people connect to). Off by default, as the Settings text and the
+   *  website's privacy copy say. See src/core/analytics/. Checked
    *  fresh on every `track()` call, so toggling this off takes effect
    *  immediately, not just for future sessions. */
   analyticsEnabled: boolean;
@@ -101,7 +99,7 @@ export const useSettingsStore = create<SettingsState>()(
       showGlobalLogs: true,
       sqlLogColorCoding: true,
       sqlLogFullText: true,
-      analyticsEnabled: true,
+      analyticsEnabled: false,
       ai: { ...EMPTY_AI_CONFIG },
 
       setRowLimit: (n) => set({ rowLimit: clampNonNegative(n, 1000) }),
@@ -138,13 +136,16 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'rdsql_settings_v1',
       storage: createJSONStorage(() => localStorage),
-      version: 1,
+      version: 2,
       migrate: (persisted, version) => {
         const state = (persisted ?? {}) as Partial<SettingsState>;
         // Before v1 the timeout was stored but never applied, with a default
         // of 30s. Keep runs unlimited for anyone still on that default, so
         // starting to enforce it doesn't cut off their long queries.
         if (version < 1 && state.execTimeoutSec === 30) state.execTimeoutSec = 0;
+        // Before v2 analytics defaulted to ON although it is described as
+        // opt-in. Nobody chose that, so reset it; users can turn it back on.
+        if (version < 2) state.analyticsEnabled = false;
         return state as SettingsState;
       },
     },

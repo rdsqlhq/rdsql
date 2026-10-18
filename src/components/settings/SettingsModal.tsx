@@ -31,6 +31,7 @@ import { ModelCombobox } from '../common/ModelCombobox';
 import { PROVIDER_PRESETS, PRESET_BY_ID } from '../../core/ai/providers';
 import { AIError, isAIConfigured, type AIProvider, type ModelInfo } from '../../core/ai/types';
 import { testConnection, fetchModels } from '../../core/ai/client';
+import { confirmAsync } from '../../store/useConfirmStore';
 
 type SettingsTab = 'account' | 'query' | 'storage' | 'log' | 'data' | 'security' | 'ai';
 
@@ -241,8 +242,8 @@ export const SettingsModal: React.FC = () => {
                   <span className="font-mono text-slate-300">{logCount} / 200</span>
                 </div>
                 <button
-                  onClick={() => {
-                    if (confirm('Clear the SQL log? This cannot be undone.')) {
+                  onClick={async () => {
+                    if (await confirmAsync({ title: 'Clear the SQL log?', message: 'This cannot be undone.', confirmLabel: 'Clear' })) {
                       clearLogs();
                       flash('SQL log cleared');
                     }

@@ -20,8 +20,10 @@ import { useTabStore } from '../../store/useTabStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { ActiveView } from '../../core/domain/types';
 
+const MOD_KEY = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
+
 const navItems: { id: ActiveView; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'plugins', label: 'Plugin Ecosystem', icon: Puzzle },
+  { id: 'integrations', label: 'Integrations', icon: Puzzle },
 ];
 
 export const Header: React.FC = () => {
@@ -39,6 +41,7 @@ export const Header: React.FC = () => {
     zoomIn,
     zoomOut,
     resetZoom,
+    setCommandPaletteOpen,
   } = useWorkspaceStore();
   const { openSqlTab } = useTabStore();
   const authStatus = useAuthStore((s) => s.status);
@@ -56,7 +59,7 @@ export const Header: React.FC = () => {
             return (
               <button
                 key={item.id}
-                onClick={() => setActiveView(item.id)}
+                onClick={() => setActiveView(activeView === item.id ? 'explorer' : item.id)}
                 title={item.label}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                   isActive
@@ -125,7 +128,8 @@ export const Header: React.FC = () => {
 
       {/* Center: Command Palette Trigger */}
       <button
-        onClick={() => openSqlTab()}
+        onClick={() => setCommandPaletteOpen(true)}
+        title="Command palette"
         className="flex items-center gap-2 px-3 py-1 rounded-lg bg-[#0f172a] border border-[#1e293b] text-slate-400 hover:text-slate-200 hover:border-blue-500/50 text-xs transition-all w-9 sm:w-auto sm:min-w-[10rem] md:w-64 justify-center sm:justify-between shrink-0 mx-2"
       >
         <div className="flex items-center gap-2 whitespace-nowrap overflow-hidden">
@@ -133,7 +137,7 @@ export const Header: React.FC = () => {
           <span className="hidden sm:inline truncate">Quick command or SQL...</span>
         </div>
         <kbd className="hidden md:inline px-1.5 py-0.5 text-[10px] font-mono bg-[#1e293b] rounded text-slate-400 border border-[#334155] shrink-0">
-          ⌘K
+          {MOD_KEY}K
         </kbd>
       </button>
 

@@ -254,7 +254,7 @@ export type ActiveView =
   | 'transfer'
   | 'ai'
   | 'health'
-  | 'plugins'
+  | 'integrations'
   | 'storage';
 
 // ---------------------------------------------------------------------------

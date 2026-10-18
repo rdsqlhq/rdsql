@@ -46,6 +46,7 @@ import {
   type IndexInfo,
   type ForeignKeyInfo,
 } from '../../core/sql/indexIntrospection';
+import { confirmAsync } from '../../store/useConfirmStore';
 
 interface TableStructureModalProps {
   isOpen: boolean;
@@ -631,9 +632,9 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     setIsAddingIndex(false);
   };
 
-  const handleDropIndex = (idx: IndexInfo) => {
+  const handleDropIndex = async (idx: IndexInfo) => {
     if (idx.isPrimary) return; // PK is managed via columns
-    if (!window.confirm(`Drop index "${idx.name}"?`)) return;
+    if (!(await confirmAsync({ title: `Drop index "${idx.name}"?`, confirmLabel: 'Drop' }))) return;
     const sql = dropIndexSql(engine, schemaName, tableName, idx.name);
     runDdl(sql, `Index "${idx.name}" dropped`);
   };
@@ -714,8 +715,8 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     setIsAddingFk(false);
   };
 
-  const handleDropFk = (fk: ForeignKeyInfo) => {
-    if (!window.confirm(`Drop foreign key "${fk.constraintName}"?`)) return;
+  const handleDropFk = async (fk: ForeignKeyInfo) => {
+    if (!(await confirmAsync({ title: `Drop foreign key "${fk.constraintName}"?`, confirmLabel: 'Drop' }))) return;
     const sql = dropForeignKeySql(engine, schemaName, tableName, fk.constraintName);
     runDdl(sql, `Foreign key "${fk.constraintName}" dropped`);
   };
@@ -854,8 +855,8 @@ export const TableStructureModal: React.FC<TableStructureModalProps> = ({
     runEnumDdl(statements.join('\n'), `Enum type "${original.name}" updated`);
   };
 
-  const handleRemoveEnum = (t: EnumTypeInfo) => {
-    if (!window.confirm(`Drop enum type "${t.name}"? This fails if any column still uses it.`)) return;
+  const handleRemoveEnum = async (t: EnumTypeInfo) => {
+    if (!(await confirmAsync({ title: `Drop enum type "${t.name}"?`, message: 'This fails if any column still uses it.', confirmLabel: 'Drop' }))) return;
     runEnumDdl(`DROP TYPE ${qualifiedType(t.name)};`, `Enum type "${t.name}" dropped`);
   };
 

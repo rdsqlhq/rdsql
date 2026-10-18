@@ -43,8 +43,9 @@ export function clearLocalSettingsSyncState(): void {
 }
 
 interface SyncedSettingsPayload {
-  /** Settings format: 1 = the timeout is enforced (0 means none). Missing on
-   *  payloads from older app versions. */
+  /** Settings format. 1: the timeout is enforced (0 means none). 2: analytics
+   *  is off unless the user turned it on. Missing on payloads from older app
+   *  versions. */
   settingsVersion?: number;
   rowLimit: number;
   execTimeoutSec: number;
@@ -66,7 +67,7 @@ interface SyncedSettingsPayload {
 export async function pushSettings(): Promise<void> {
   const s = useSettingsStore.getState();
   const payload: SyncedSettingsPayload = {
-    settingsVersion: 1,
+    settingsVersion: 2,
     rowLimit: s.rowLimit,
     execTimeoutSec: s.execTimeoutSec,
     s3PreviewMaxBytes: s.s3PreviewMaxBytes,
@@ -139,7 +140,10 @@ export async function pullSettings(): Promise<boolean> {
     showGlobalLogs: payload.showGlobalLogs,
     sqlLogColorCoding: payload.sqlLogColorCoding,
     sqlLogFullText: payload.sqlLogFullText,
-    analyticsEnabled: payload.analyticsEnabled,
+    // Older versions defaulted analytics to on without the user choosing it,
+    // so only take the value from payloads that know it's opt-in.
+    analyticsEnabled:
+      (payload.settingsVersion ?? 0) >= 2 ? payload.analyticsEnabled : useSettingsStore.getState().analyticsEnabled,
     ai: { ...useSettingsStore.getState().ai, ...payload.ai, apiKey },
   });
   return true;
