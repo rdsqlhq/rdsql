@@ -156,6 +156,8 @@ export interface QueryResultSet {
    *  SELECT — the result grid becomes editable against this table. `undefined`
    *  for joins, aggregates, CTEs, unions, etc. → the grid renders read-only. */
   editableTable?: { name: string; schema?: string };
+  /** Set when the row limit cut the result off: the limit that applied. */
+  truncatedAt?: number;
 }
 
 export interface ErdSchemaContext {

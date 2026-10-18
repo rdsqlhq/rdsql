@@ -1,12 +1,55 @@
 import { DatabaseEngine, QueryColumn, SchemaTableNode } from '../domain/types';
 import { quoteIdent, qualifiedTable } from '../sql/ident';
-import { isMssqlFamily, isMysqlFamily } from '../connection/engines';
+import { engineFamily, isMssqlFamily, isMysqlFamily } from '../connection/engines';
 
-export function sqlLiteral(value: unknown): string {
+/** Quotes text as a single-quoted SQL string. MySQL-family servers treat a
+ *  backslash as an escape character by default, so it is doubled there;
+ *  otherwise `C:\new` would come back with a newline in it. */
+export function quoteSqlString(text: string, engine?: string): string {
+  let s = text.replace(/'/g, "''");
+  if (engine && isMysqlFamily(engine)) s = s.replace(/\\/g, '\\\\');
+  return `'${s}'`;
+}
+
+/** Literal for a grid cell in a WHERE/SET/VALUES clause: every value is sent
+ *  as a quoted string (the server casts it to the column type) and objects
+ *  as their JSON text. */
+export function cellLiteral(value: unknown, engine: string): string {
+  if (value === null || value === undefined) return 'NULL';
+  return quoteSqlString(typeof value === 'object' ? JSON.stringify(value) : String(value), engine);
+}
+
+/** Postgres array literal (`{1,"a b",NULL}`) for a JSON array cell. */
+function pgArrayLiteral(values: unknown[]): string {
+  const item = (v: unknown): string => {
+    if (v === null || v === undefined) return 'NULL';
+    if (Array.isArray(v)) return pgArrayLiteral(v);
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    const text = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  };
+  return `{${values.map(item).join(',')}}`;
+}
+
+/**
+ * SQL literal for a value read back from a query result.
+ *
+ * `engine` picks the string escaping. `dataType` (the result column's type)
+ * tells Postgres arrays (`_int4`, `_text`, ...) apart from JSON arrays, since
+ * both arrive as JSON arrays; objects and other arrays are written as JSON.
+ */
+export function sqlLiteral(value: unknown, engine?: string, dataType?: string): string {
   if (value === null || value === undefined) return 'NULL';
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL';
-  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-  return `'${String(value).replace(/'/g, "''")}'`;
+  if (typeof value === 'boolean') {
+    if (engine && isMssqlFamily(engine)) return value ? '1' : '0';
+    return value ? 'TRUE' : 'FALSE';
+  }
+  if (Array.isArray(value) && engine && engineFamily(engine) === 'postgres' && dataType?.startsWith('_')) {
+    return quoteSqlString(pgArrayLiteral(value), engine);
+  }
+  if (typeof value === 'object') return quoteSqlString(JSON.stringify(value), engine);
+  return quoteSqlString(String(value), engine);
 }
 
 /**
@@ -95,7 +138,7 @@ export function selectKeysetChunkSql(
 ): string {
   const target = qualifiedTable(engine, tableName, schemaName);
   const pkIdent = quoteIdent(engine, pkColumn);
-  const where = afterValue === null || afterValue === undefined ? '' : ` WHERE ${pkIdent} > ${sqlLiteral(afterValue)}`;
+  const where = afterValue === null || afterValue === undefined ? '' : ` WHERE ${pkIdent} > ${sqlLiteral(afterValue, engine)}`;
   if (isMssqlFamily(engine)) {
     return `SELECT TOP ${Math.floor(limit)} * FROM ${target}${where} ORDER BY ${pkIdent} ASC;`;
   }
@@ -182,43 +225,11 @@ export function generateInsertStatements(
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const chunk = rows.slice(i, i + batchSize);
-    const valuesSql = chunk.map((row) => `(${row.map((v) => sqlLiteral(v)).join(', ')})`).join(',\n  ');
+    const valuesSql = chunk.map((row) => `(${row.map((v, ci) => sqlLiteral(v, engine, columns[ci]?.data_type)).join(', ')})`).join(',\n  ');
     statements.push(`INSERT INTO ${target} (${colNames}) VALUES\n  ${valuesSql};`);
   }
 
   return statements;
 }
 
-/**
- * Splits a SQL script on top-level semicolons, respecting single-quoted
- * string literals (with standard '' escaping) so a semicolon inside a data
- * value doesn't fracture a statement. This is what backup files this app
- * generates (and most hand-written standard SQL) use — it isn't a full SQL
- * parser, so exotic dollar-quoting or dialect-specific literal styles
- * aren't handled.
- */
-export function splitSqlStatements(sql: string): string[] {
-  const statements: string[] = [];
-  let current = '';
-  let inString = false;
-
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    current += ch;
-    if (ch === "'") {
-      if (inString && sql[i + 1] === "'") {
-        current += sql[++i];
-        continue;
-      }
-      inString = !inString;
-    } else if (ch === ';' && !inString) {
-      const trimmed = current.trim();
-      if (trimmed) statements.push(trimmed);
-      current = '';
-    }
-  }
-
-  const tail = current.trim();
-  if (tail) statements.push(tail);
-  return statements;
-}
+export { splitSqlStatements } from '../sql/splitStatements';

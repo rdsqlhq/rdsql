@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::{FromSql, Kind, Type as PgType};
 use rusqlite::Connection;
 use mysql_async::prelude::*;
+use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 use super::connection::{normalize_host, ConnectionConfig};
 use super::error::{from_mysql, from_postgres, from_sqlite, DbError, ErrorKind};
@@ -336,59 +337,179 @@ fn pg_array_to_json(row: &tokio_postgres::Row, idx: usize, elem_ty: &PgType) -> 
 }
 
 async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
-    let start = Instant::now();
     let sql = request.sql.trim();
-
     if sql.is_empty() {
         return Err(DbError::app("SQL statement is empty — nothing to execute.").to_json_string());
     }
+    let mut session = Session::open(&request.config).await?;
+    let result = session.run(sql, None).await.map(|(r, _)| r);
+    session.close().await;
+    result
+}
 
-    let engine = request.config.engine.to_lowercase();
+/// One open database connection. `execute_query` opens one per statement,
+/// while `execute_batch` keeps a single session for a whole editor run, so
+/// BEGIN/COMMIT/ROLLBACK, SET, temp tables and USE carry from one statement
+/// to the next.
+///
+/// Dropping a session closes its connection, so the server rolls back any
+/// transaction the run left open, including when the user presses Stop.
+pub(crate) enum Session {
+    Sqlite { conn: Connection, path: String },
+    Postgres(tokio_postgres::Client),
+    Mysql { pool: mysql_async::Pool, conn: mysql_async::Conn },
+    Duckdb { conn: duckdb::Connection, config: ConnectionConfig },
+    Mssql(super::mssql::MssqlClient),
+    /// D1 is a stateless HTTP API: each statement is its own request.
+    D1(ConnectionConfig),
+}
 
-    // D1 reuses SQLite SQL over REST — short-circuit before family dispatch.
-    if engine == "cloudflare-d1" || engine == "d1" {
-        let result = super::d1::run_d1_query(&request.config, sql).await?;
-        let columns = result
-            .columns
-            .iter()
-            .map(|c| QueryColumn {
-                name: c.name.clone(),
-                data_type: c.data_type.clone(),
-                enum_values: None,
-            })
-            .collect();
-        return Ok(QueryResult {
-            columns,
-            rows: result.rows,
-            execution_time_ms: result.execution_time_ms,
-            affected_rows: result.affected_rows,
-            status_message: result.status_message,
-        });
-    }
-    // DuckDB has its own driver — dispatch to the dedicated module.
-    if engine == "duckdb" {
-        return super::duckdb::run_duckdb_query(&request.config, sql);
-    }
-    // SQL Server has its own driver — dispatch to the dedicated module.
-    if engine == "mssql" || engine == "sqlserver" || engine == "azuresql" {
-        return super::mssql::run_mssql_query(&request.config, sql).await;
-    }
+impl Session {
+    pub(crate) async fn open(config: &ConnectionConfig) -> Result<Session, String> {
+        let engine = config.engine.to_lowercase();
 
-    match super::engine::engine_family(&engine) {
-        super::engine::EngineFamily::Sqlite => {
-            let path = request.config.file_path.unwrap_or_default();
-            if path.is_empty() {
-                return Err(DbError::app("SQLite file path is empty. Set a database file in the connection.").to_json_string());
+        if engine == "cloudflare-d1" || engine == "d1" {
+            return Ok(Session::D1(config.clone()));
+        }
+        if engine == "duckdb" {
+            let conn = super::duckdb::open(config)?;
+            return Ok(Session::Duckdb { conn, config: config.clone() });
+        }
+        if engine == "mssql" || engine == "sqlserver" || engine == "azuresql" {
+            return Ok(Session::Mssql(super::mssql::connect_session(config).await?));
+        }
+
+        match super::engine::engine_family(&engine) {
+            super::engine::EngineFamily::Sqlite => {
+                let path = config.file_path.clone().unwrap_or_default();
+                if path.is_empty() {
+                    return Err(DbError::app("SQLite file path is empty. Set a database file in the connection.").to_json_string());
+                }
+                let conn = Connection::open(&path).map_err(|e| from_sqlite(e, None).to_json_string())?;
+                Ok(Session::Sqlite { conn, path })
             }
-            let conn = Connection::open(&path).map_err(|e| from_sqlite(e, None).to_json_string())?;
+            super::engine::EngineFamily::Postgres => {
+                let host = normalize_host(config.host.clone());
+                let port = config.port.or_else(|| super::engine::default_port(&engine)).unwrap_or(5432);
+                let (host, port) = super::ssh_tunnel::resolve_target(config, host, port).await?;
+                let user = config.username.clone().unwrap_or_else(|| "postgres".to_string());
+                let db = config.database.clone().unwrap_or_else(|| "postgres".to_string());
+                let pass = config.password.clone().unwrap_or_default();
 
-            if sql.to_uppercase().starts_with("SELECT")
-                || sql.to_uppercase().starts_with("PRAGMA")
-                || sql.to_uppercase().starts_with("EXPLAIN")
-            {
+                let conn_str = format!(
+                    "host={} port={} user={} dbname={} password={}",
+                    host, port, user, db, pass
+                );
+
+                let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, config.ssl_mode.as_deref())).await {
+                    Ok(Ok(pair)) => pair,
+                    Ok(Err(e)) => {
+                        let mut d = from_postgres(e, None);
+                        // Connect-time failures are connection-class even if the
+                        // server replied (e.g. bad password / wrong database).
+                        d.kind = ErrorKind::Connection;
+                        return Err(d.to_json_string());
+                    }
+                    Err(_) => {
+                        return Err(DbError::connection(format!(
+                            "PostgreSQL connection timed out after {}s — check that the server is running on {}:{}",
+                            CONNECT_TIMEOUT.as_secs(), host, port
+                        )).to_json_string())
+                    }
+                };
+
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        log::warn!("PostgreSQL connection error: {}", e);
+                    }
+                });
+                Ok(Session::Postgres(client))
+            }
+            super::engine::EngineFamily::Mysql => {
+                let host = normalize_host(config.host.clone());
+                let port = config.port.or_else(|| super::engine::default_port(&engine)).unwrap_or(3306);
+                let (host, port) = super::ssh_tunnel::resolve_target(config, host, port).await?;
+                let user = config.username.clone().unwrap_or_else(|| "root".to_string());
+                let db = config.database.clone().filter(|d| !d.is_empty());
+                let pass = config.password.clone().unwrap_or_default();
+
+                let opts = mysql_opts(host.clone(), port, user, pass, db);
+                // Create a fresh pool per session. Connection pooling was attempted but
+                // caused "Pool was disconnected" errors when connections went stale
+                // after the server's wait_timeout.
+                let pool = mysql_async::Pool::new(opts);
+                let conn = match tokio::time::timeout(CONNECT_TIMEOUT, pool.get_conn()).await {
+                    Ok(Ok(c)) => c,
+                    Ok(Err(e)) => {
+                        let mut d: DbError = from_mysql(e, None).into();
+                        d.kind = ErrorKind::Connection;
+                        return Err(d.to_json_string());
+                    }
+                    Err(_) => {
+                        return Err(DbError::connection(format!(
+                            "MySQL connection timed out after {}s — check that MySQL is running on {}:{}",
+                            CONNECT_TIMEOUT.as_secs(), host, port
+                        )).to_json_string())
+                    }
+                };
+                Ok(Session::Mysql { pool, conn })
+            }
+            // Dispatched by engine name above; kept so the match stays exhaustive.
+            super::engine::EngineFamily::Duckdb | super::engine::EngineFamily::Mssql => {
+                Err(DbError::app("Query was not dispatched correctly.").to_json_string())
+            }
+        }
+    }
+
+    /// Points unqualified names at `schema` for the rest of the session
+    /// (Postgres family only; MySQL selects its database at connect time).
+    pub(crate) async fn set_schema(&mut self, schema: &str) -> Result<(), String> {
+        if let Session::Postgres(client) = self {
+            let sql = format!("SET search_path TO {}, public", quote_pg_ident(schema));
+            client.batch_execute(&sql).await.map_err(|e| from_postgres(e, Some(&sql)).to_json_string())?;
+        }
+        Ok(())
+    }
+
+    /// Runs one statement. With `row_limit`, at most that many rows are kept
+    /// and the second value reports whether more were returned.
+    pub(crate) async fn run(&mut self, sql: &str, row_limit: Option<usize>) -> Result<(QueryResult, bool), String> {
+        let start = Instant::now();
+        let limit = row_limit.unwrap_or(usize::MAX);
+        match self {
+            Session::D1(config) => {
+                let result = super::d1::run_d1_query(config, sql).await?;
+                let columns = result
+                    .columns
+                    .iter()
+                    .map(|c| QueryColumn {
+                        name: c.name.clone(),
+                        data_type: c.data_type.clone(),
+                        enum_values: None,
+                    })
+                    .collect();
+                Ok(truncate(QueryResult {
+                    columns,
+                    rows: result.rows,
+                    execution_time_ms: result.execution_time_ms,
+                    affected_rows: result.affected_rows,
+                    status_message: result.status_message,
+                }, limit))
+            }
+            Session::Duckdb { conn, config } => {
+                Ok(truncate(super::duckdb::run_duckdb_on(conn, config, sql)?, limit))
+            }
+            Session::Mssql(client) => Ok(truncate(super::mssql::run_mssql_on(client, sql).await?, limit)),
+            Session::Sqlite { conn, path } => {
                 let mut stmt = conn.prepare(sql).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())?;
-                let col_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+                // A statement that yields columns returns rows (SELECT, PRAGMA,
+                // EXPLAIN, WITH ... SELECT, INSERT ... RETURNING).
+                if stmt.column_count() == 0 {
+                    let affected = stmt.execute([]).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())? as u64;
+                    return Ok((affected_result(affected, start), false));
+                }
 
+                let col_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
                 let columns: Vec<QueryColumn> = col_names
                     .iter()
                     .map(|n| QueryColumn {
@@ -399,9 +520,18 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     .collect();
 
                 let mut rows_data = Vec::new();
+                let mut truncated = false;
                 let mut rows_iter = stmt.query([]).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())?;
-
-                while let Ok(Some(row)) = rows_iter.next() {
+                loop {
+                    let row = match rows_iter.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(e) => return Err(from_sqlite(e, Some(sql)).to_json_string()),
+                    };
+                    if rows_data.len() >= limit {
+                        truncated = true;
+                        break;
+                    }
                     let mut row_vals = Vec::new();
                     for i in 0..col_names.len() {
                         let val: rusqlite::types::Value = row.get(i).unwrap_or(rusqlite::types::Value::Null);
@@ -417,79 +547,31 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     rows_data.push(row_vals);
                 }
 
-                let elapsed = start.elapsed().as_millis() as u64;
                 let count = rows_data.len() as u64;
-                Ok(QueryResult {
+                Ok((QueryResult {
                     columns,
                     rows: rows_data,
-                    execution_time_ms: elapsed,
+                    execution_time_ms: start.elapsed().as_millis() as u64,
                     affected_rows: count,
                     status_message: format!("Query executed successfully ({})", path),
-                })
-            } else {
-                let affected = conn.execute(sql, []).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())? as u64;
-                let elapsed = start.elapsed().as_millis() as u64;
-                Ok(QueryResult {
-                    columns: vec![],
-                    rows: vec![],
-                    execution_time_ms: elapsed,
-                    affected_rows: affected,
-                    status_message: format!("OK, {} rows affected", affected),
-                })
+                }, truncated))
             }
-        }
-        super::engine::EngineFamily::Postgres => {
-            let host = normalize_host(request.config.host.clone());
-            let port = request.config.port.or_else(|| super::engine::default_port(&engine)).unwrap_or(5432);
-            let (host, port) = super::ssh_tunnel::resolve_target(&request.config, host, port).await?;
-            let user = request.config.username.unwrap_or_else(|| "postgres".to_string());
-            let db = request.config.database.unwrap_or_else(|| "postgres".to_string());
-            let pass = request.config.password.unwrap_or_default();
-
-            let conn_str = format!(
-                "host={} port={} user={} dbname={} password={}",
-                host, port, user, db, pass
-            );
-
-            let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT, crate::commands::pg_tls::connect(&conn_str, request.config.ssl_mode.as_deref())).await {
-                Ok(Ok(pair)) => pair,
-                Ok(Err(e)) => {
-                    let mut d = from_postgres(e, None);
-                    // Connect-time failures are connection-class even if the
-                    // server replied (e.g. bad password / wrong database).
-                    d.kind = ErrorKind::Connection;
-                    return Err(d.to_json_string());
-                }
-                Err(_) => {
-                    return Err(DbError::connection(format!(
-                        "PostgreSQL connection timed out after {}s — check that the server is running on {}:{}",
-                        CONNECT_TIMEOUT.as_secs(), host, port
-                    )).to_json_string())
-                }
-            };
-
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    log::warn!("PostgreSQL connection error: {}", e);
-                }
-            });
-
-            if sql.to_uppercase().starts_with("SELECT")
-                || sql.to_uppercase().starts_with("EXPLAIN")
-                || sql.to_uppercase().starts_with("SHOW")
-            {
-                // Prepare the statement first so we can extract column metadata
-                // even when the query returns zero rows (empty table preview).
+            Session::Postgres(client) => {
+                // Prepare first: it gives column metadata even for zero rows, and
+                // tells row-returning statements (SELECT, WITH, VALUES,
+                // ... RETURNING) apart from the rest without guessing from the
+                // leading keyword.
                 let stmt = client.prepare(sql).await
                     .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                if stmt.columns().is_empty() {
+                    let count = client.execute(&stmt, &[]).await
+                        .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                    return Ok((affected_result(count, start), false));
+                }
+
                 // `col.type_().kind()` already carries a resolved enum's
-                // labels directly — tokio-postgres's own `prepare()` queries
-                // pg_enum internally the first time it sees an unrecognized
-                // OID (see tokio_postgres::prepare::get_type) and caches the
-                // result, so no extra catalog round-trip is needed here (an
-                // earlier version of this ran its own pg_type/pg_enum query,
-                // which was both redundant and, if it ever failed silently,
-                // left enum_values permanently None with no visible error).
+                // labels: tokio-postgres's `prepare()` looks up unknown OIDs
+                // in pg_enum itself and caches them.
                 let columns: Vec<QueryColumn> = stmt
                     .columns()
                     .iter()
@@ -505,88 +587,55 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                         }
                     })
                     .collect();
-                // Keep the column Type OIDs so we can dispatch each cell's
-                // conversion by its actual PostgreSQL type (int8, float8, bool,
-                // text, etc.) instead of blindly casting everything to String
-                // — which silently nullifies non-character types.
+                // Keep the column types so each cell is converted by its real
+                // PostgreSQL type instead of being cast to String.
                 let col_types: Vec<PgType> = stmt.columns().iter().map(|c| c.type_().clone()).collect();
-                drop(stmt);
 
-                let rows = client.query(sql, &[]).await
+                // Stream rows so a row limit stops reading early instead of
+                // buffering the whole result first.
+                let no_params: [&(dyn tokio_postgres::types::ToSql + Sync); 0] = [];
+                let stream = client.query_raw(&stmt, no_params.iter().copied()).await
                     .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                futures_util::pin_mut!(stream);
 
                 let mut rows_data = Vec::new();
-                for row in &rows {
-                    let mut row_vals = Vec::new();
-                    for i in 0..columns.len() {
-                        let ty = &col_types[i];
-                        row_vals.push(pg_cell_to_json(row, i, ty));
+                let mut truncated = false;
+                while let Some(row) = stream.next().await {
+                    let row = row.map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                    if rows_data.len() >= limit {
+                        truncated = true;
+                        break;
+                    }
+                    let mut row_vals = Vec::with_capacity(col_types.len());
+                    for (i, ty) in col_types.iter().enumerate() {
+                        row_vals.push(pg_cell_to_json(&row, i, ty));
                     }
                     rows_data.push(row_vals);
                 }
 
-                let elapsed = start.elapsed().as_millis() as u64;
                 let count = rows_data.len() as u64;
-                Ok(QueryResult {
+                Ok((QueryResult {
                     columns,
                     rows: rows_data,
-                    execution_time_ms: elapsed,
+                    execution_time_ms: start.elapsed().as_millis() as u64,
                     affected_rows: count,
                     status_message: "Query executed successfully".to_string(),
-                })
-            } else {
-                let count = client.execute(sql, &[]).await
-                    .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
-                let elapsed = start.elapsed().as_millis() as u64;
-                Ok(QueryResult {
-                    columns: vec![],
-                    rows: vec![],
-                    execution_time_ms: elapsed,
-                    affected_rows: count,
-                    status_message: format!("OK, {} rows affected", count),
-                })
+                }, truncated))
             }
-        }
-        super::engine::EngineFamily::Mysql => {
-            let host = normalize_host(request.config.host.clone());
-            let port = request.config.port.or_else(|| super::engine::default_port(&engine)).unwrap_or(3306);
-            let (host, port) = super::ssh_tunnel::resolve_target(&request.config, host, port).await?;
-            let user = request.config.username.unwrap_or_else(|| "root".to_string());
-            let db = request.config.database.clone().filter(|d| !d.is_empty());
-            let pass = request.config.password.unwrap_or_default();
+            Session::Mysql { conn, .. } => {
+                let mut result = conn.query_iter(sql).await
+                    .map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
 
-            let opts = mysql_opts(host.clone(), port, user, pass, db);
-            // Create a fresh pool per call. Connection pooling was attempted but
-            // caused "Pool was disconnected" errors when connections went stale
-            // after the server's wait_timeout. The frontend batching (fast mode)
-            // mitigates the overhead by reducing the number of IPC calls.
-            let pool = mysql_async::Pool::new(opts);
-            let mut conn = match tokio::time::timeout(CONNECT_TIMEOUT, pool.get_conn()).await {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => {
-                    let mut d: DbError = from_mysql(e, None).into();
-                    d.kind = ErrorKind::Connection;
-                    return Err(d.to_json_string());
-                }
-                Err(_) => {
-                    return Err(DbError::connection(format!(
-                        "MySQL connection timed out after {}s — check that MySQL is running on {}:{}",
-                        CONNECT_TIMEOUT.as_secs(), host, port
-                    )).to_json_string())
-                }
-            };
-
-            let upper = sql.to_uppercase();
-            if upper.starts_with("SELECT")
-                || upper.starts_with("SHOW")
-                || upper.starts_with("EXPLAIN")
-                || upper.starts_with("DESC")
-            {
-                let mut result = conn.query_iter(sql).await.map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
-
-                // Extract column metadata from the query result before iterating
-                // rows so it's available even when the table is empty.
+                // Column metadata is available before reading rows, so it is
+                // there even when the result is empty. No columns means a
+                // statement without a result set (INSERT, UPDATE, DDL, ...).
                 let col_meta = result.columns_ref().to_vec();
+                if col_meta.is_empty() {
+                    let affected = result.affected_rows();
+                    result.drop_result().await
+                        .map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
+                    return Ok((affected_result(affected, start), false));
+                }
                 let columns: Vec<QueryColumn> = col_meta
                     .iter()
                     .map(|c| QueryColumn {
@@ -597,19 +646,19 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     .collect();
 
                 let mut rows_data = Vec::new();
+                let mut truncated = false;
                 loop {
-                    let row_opt = match result.next().await {
-                        Ok(o) => o,
-                        Err(e) => {
-                            drop(conn);
-                            let _ = pool.disconnect().await;
-                            return Err(from_mysql(e, Some(sql)).0.to_json_string());
-                        }
+                    let row = match result.next().await {
+                        Ok(Some(r)) => r,
+                        Ok(None) => break,
+                        Err(e) => return Err(from_mysql(e, Some(sql)).0.to_json_string()),
                     };
-                    let row = match row_opt {
-                        Some(r) => r,
-                        None => break,
-                    };
+                    // Past the limit, keep reading (the connection must drain the
+                    // result before the next statement) but stop storing rows.
+                    if rows_data.len() >= limit {
+                        truncated = true;
+                        continue;
+                    }
                     let mut row_vals = Vec::new();
                     for i in 0..columns.len() {
                         let json_val = match row.as_ref(i) {
@@ -620,43 +669,291 @@ async fn run_query(request: QueryRequest) -> Result<QueryResult, String> {
                     }
                     rows_data.push(row_vals);
                 }
+                // A CALL can return more result sets; drain them too.
+                result.drop_result().await
+                    .map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
 
-                drop(conn);
-                let _ = pool.disconnect().await;
-
-                let elapsed = start.elapsed().as_millis() as u64;
                 let count = rows_data.len() as u64;
-                Ok(QueryResult {
+                Ok((QueryResult {
                     columns,
                     rows: rows_data,
-                    execution_time_ms: elapsed,
+                    execution_time_ms: start.elapsed().as_millis() as u64,
                     affected_rows: count,
                     status_message: "Query executed successfully".to_string(),
-                })
-            } else {
-                conn.query_drop(sql).await.map_err(|e| { let d: DbError = from_mysql(e, Some(sql)).into(); d.to_json_string() })?;
-                let affected = conn.affected_rows();
-                let elapsed = start.elapsed().as_millis() as u64;
-                drop(conn);
-                let _ = pool.disconnect().await;
-                Ok(QueryResult {
-                    columns: vec![],
-                    rows: vec![],
-                    execution_time_ms: elapsed,
-                    affected_rows: affected,
-                    status_message: format!("OK, {} rows affected", affected),
-                })
+                }, truncated))
             }
         }
-        // DuckDB is short-circuited above (`run_duckdb_query`); this arm is
-        // unreachable but keeps the family match exhaustive.
-        super::engine::EngineFamily::Duckdb => {
-            Err(DbError::app("DuckDB query was not dispatched correctly.").to_json_string())
+    }
+
+    pub(crate) async fn close(self) {
+        if let Session::Mysql { pool, conn } = self {
+            drop(conn);
+            let _ = pool.disconnect().await;
         }
-        // SQL Server is short-circuited above (`run_mssql_query`); this arm is
-        // unreachable but keeps the family match exhaustive.
-        super::engine::EngineFamily::Mssql => {
-            Err(DbError::app("SQL Server query was not dispatched correctly.").to_json_string())
+    }
+}
+
+fn affected_result(affected: u64, start: Instant) -> QueryResult {
+    QueryResult {
+        columns: vec![],
+        rows: vec![],
+        execution_time_ms: start.elapsed().as_millis() as u64,
+        affected_rows: affected,
+        status_message: format!("OK, {} rows affected", affected),
+    }
+}
+
+fn truncate(mut result: QueryResult, limit: usize) -> (QueryResult, bool) {
+    let truncated = result.rows.len() > limit;
+    if truncated {
+        result.rows.truncate(limit);
+        result.affected_rows = limit as u64;
+    }
+    (result, truncated)
+}
+
+fn quote_pg_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRequest {
+    pub config: ConnectionConfig,
+    pub statements: Vec<String>,
+    /// Postgres-family schema the editor tab targets (sets `search_path`).
+    pub schema: Option<String>,
+    /// Max rows kept per result set; `None` or 0 keeps everything.
+    pub row_limit: Option<usize>,
+    /// Per-statement timeout in seconds; `None` or 0 means no timeout.
+    pub timeout_sec: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchItem {
+    pub statement: String,
+    pub result: Option<QueryResult>,
+    pub error: Option<String>,
+    /// More rows were returned than `row_limit` allowed.
+    pub truncated: bool,
+    pub duration_ms: u64,
+}
+
+/// Runs an editor buffer's statements in order on ONE connection, stopping at
+/// the first error. The whole batch shares `query_id`, so Stop cancels it.
+#[tauri::command]
+pub async fn execute_batch(
+    request: BatchRequest,
+    query_id: String,
+    registry: tauri::State<'_, QueryRegistry>,
+) -> Result<Vec<BatchItem>, String> {
+    let token = CancellationToken::new();
+    registry.lock().await.insert(query_id.clone(), token.clone());
+
+    let result = tokio::select! {
+        biased;
+        _ = token.cancelled() => Err(DbError::app(CANCELLED_BY_USER).to_json_string()),
+        res = run_batch(request) => res,
+    };
+
+    registry.lock().await.remove(&query_id);
+    result
+}
+
+async fn run_batch(request: BatchRequest) -> Result<Vec<BatchItem>, String> {
+    let mut session = Session::open(&request.config).await?;
+    if let Some(schema) = request.schema.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Err(e) = session.set_schema(schema).await {
+            session.close().await;
+            return Err(e);
         }
+    }
+    let row_limit = request.row_limit.filter(|n| *n > 0);
+    let timeout = request.timeout_sec.filter(|n| *n > 0).map(Duration::from_secs);
+
+    let mut items = Vec::new();
+    for statement in request.statements {
+        let sql = statement.trim();
+        if sql.is_empty() {
+            continue;
+        }
+        let start = Instant::now();
+        let outcome = match timeout {
+            Some(t) => match tokio::time::timeout(t, session.run(sql, row_limit)).await {
+                Ok(r) => r,
+                Err(_) => Err(DbError::app(format!(
+                    "Query timed out after {}s. Change the limit in Settings → Query Execution.",
+                    t.as_secs()
+                )).to_json_string()),
+            },
+            None => session.run(sql, row_limit).await,
+        };
+        let duration_ms = start.elapsed().as_millis() as u64;
+        match outcome {
+            Ok((result, truncated)) => items.push(BatchItem {
+                statement: sql.to_string(),
+                result: Some(result),
+                error: None,
+                truncated,
+                duration_ms,
+            }),
+            Err(error) => {
+                items.push(BatchItem {
+                    statement: sql.to_string(),
+                    result: None,
+                    error: Some(error),
+                    truncated: false,
+                    duration_ms,
+                });
+                break;
+            }
+        }
+    }
+    session.close().await;
+    Ok(items)
+}
+
+/// Sessions kept open across IPC calls, for work that sends statements one at
+/// a time but needs them on one connection. Restore depends on this: its
+/// `SET FOREIGN_KEY_CHECKS = 0` must still apply to the INSERTs after it.
+pub struct SessionRegistry(pub(crate) Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>);
+
+static NEXT_SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+#[tauri::command]
+pub async fn session_open(config: ConnectionConfig, sessions: tauri::State<'_, SessionRegistry>) -> Result<String, String> {
+    let session = Session::open(&config).await?;
+    let id = format!("session_{}", NEXT_SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    sessions.0.lock().await.insert(id.clone(), Arc::new(Mutex::new(session)));
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn session_execute(
+    session_id: String,
+    sql: String,
+    query_id: String,
+    sessions: tauri::State<'_, SessionRegistry>,
+    registry: tauri::State<'_, QueryRegistry>,
+) -> Result<QueryResult, String> {
+    let sql = sql.trim().to_string();
+    if sql.is_empty() {
+        return Err(DbError::app("SQL statement is empty — nothing to execute.").to_json_string());
+    }
+    let session = sessions.0.lock().await.get(&session_id).cloned().ok_or_else(|| {
+        DbError::connection("The database session has ended. Start the operation again.").to_json_string()
+    })?;
+
+    let token = CancellationToken::new();
+    registry.lock().await.insert(query_id.clone(), token.clone());
+    let mut guard = session.lock().await;
+    let result = tokio::select! {
+        biased;
+        _ = token.cancelled() => Err(DbError::app(CANCELLED_BY_USER).to_json_string()),
+        res = guard.run(&sql, None) => res.map(|(r, _)| r),
+    };
+    drop(guard);
+    registry.lock().await.remove(&query_id);
+
+    // A cancelled statement can leave the connection mid-response; drop the
+    // session rather than reuse it.
+    if result.as_ref().err().is_some_and(|e| e.contains(CANCELLED_BY_USER)) {
+        close_session(&sessions, &session_id).await;
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn session_close(session_id: String, sessions: tauri::State<'_, SessionRegistry>) -> Result<(), String> {
+    close_session(&sessions, &session_id).await;
+    Ok(())
+}
+
+async fn close_session(sessions: &SessionRegistry, session_id: &str) {
+    let removed = sessions.0.lock().await.remove(session_id);
+    if let Some(session) = removed {
+        if let Ok(mutex) = Arc::try_unwrap(session) {
+            mutex.into_inner().close().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sqlite_config(path: &str) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "test",
+            "engine": "sqlite",
+            "filePath": path,
+        }))
+        .unwrap()
+    }
+
+    fn temp_db(name: &str) -> String {
+        let path = std::env::temp_dir().join(format!("rdsql-batch-{}-{}.db", name, std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path.to_string_lossy().into_owned()
+    }
+
+    fn batch(path: &str, statements: &[&str], row_limit: Option<usize>) -> Vec<BatchItem> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(run_batch(BatchRequest {
+            config: sqlite_config(path),
+            statements: statements.iter().map(|s| s.to_string()).collect(),
+            schema: None,
+            row_limit,
+            timeout_sec: None,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn rollback_in_one_run_undoes_earlier_statements() {
+        let path = &temp_db("rollback");
+        batch(path, &["CREATE TABLE t (id INTEGER)", "INSERT INTO t VALUES (1)"], None);
+
+        let items = batch(path, &["BEGIN", "DELETE FROM t", "ROLLBACK"], None);
+        assert!(items.iter().all(|i| i.error.is_none()));
+
+        let items = batch(path, &["SELECT COUNT(*) FROM t"], None);
+        assert_eq!(items[0].result.as_ref().unwrap().rows[0][0], serde_json::json!(1));
+    }
+
+    #[test]
+    fn stops_at_first_error_and_reports_it() {
+        let path = temp_db("errors");
+        let items = batch(&path, &["SELECT 1", "SELECT * FROM missing", "SELECT 2"], None);
+        assert_eq!(items.len(), 2);
+        assert!(items[1].error.is_some());
+    }
+
+    #[test]
+    fn row_limit_truncates_and_flags() {
+        let path = temp_db("limit");
+        let sql = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 50) SELECT x FROM n";
+        let items = batch(&path, &[sql], Some(10));
+        let result = items[0].result.as_ref().unwrap();
+        assert_eq!(result.rows.len(), 10);
+        assert!(items[0].truncated);
+    }
+
+    #[test]
+    fn cte_and_returning_statements_return_rows() {
+        let path = temp_db("cte");
+        let items = batch(
+            &path,
+            &["CREATE TABLE t (id INTEGER)", "INSERT INTO t VALUES (7) RETURNING id", "WITH x AS (SELECT id FROM t) SELECT * FROM x"],
+            None,
+        );
+        assert_eq!(items[1].result.as_ref().unwrap().rows[0][0], serde_json::json!(7));
+        assert_eq!(items[2].result.as_ref().unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn quotes_pg_identifiers() {
+        assert_eq!(quote_pg_ident("sales"), "\"sales\"");
+        assert_eq!(quote_pg_ident("we\"ird"), "\"we\"\"ird\"");
     }
 }

@@ -1,6 +1,7 @@
 import type { DatabaseEngine } from '../domain/types';
 import { getEngineCapabilities, type BackupEngineCapabilities } from './backupEngine';
 import { splitSqlStatements } from './backupSql';
+import { sqlDialectFor } from '../sql/splitStatements';
 
 /**
  * Restore statement categorization. Statements from a backup file are parsed
@@ -115,7 +116,7 @@ export function categorizeStatement(stmt: string, capabilities?: BackupEngineCap
  */
 export function buildRestorePlan(sqlText: string, engine?: DatabaseEngine): RestorePlan {
   const capabilities = engine ? getEngineCapabilities(engine) : undefined;
-  const rawStatements = splitSqlStatements(sqlText);
+  const rawStatements = splitSqlStatements(sqlText, sqlDialectFor(engine));
 
   const items: RestorePlanItem[] = rawStatements.map((stmt, idx) => ({
     statement: stmt,

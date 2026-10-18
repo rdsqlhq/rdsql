@@ -7,10 +7,9 @@ import { EMPTY_AI_CONFIG, type AIConfig, type AIProvider } from '../core/ai/type
  * Application settings store — persisted, versioned. Backs the Settings view's
  * real (no longer placeholder) inputs.
  *
- * NOTE: `rowLimit` and `execTimeoutSec` are stored here and surfaced in the UI,
- * but the query executor does not yet read them — wiring them into
- * `execute_query` is a follow-up. `s3PreviewMaxBytes` IS consumed today (by the
- * StorageFileViewer, via the StorageBrowser's preview pane).
+ * `rowLimit` and `execTimeoutSec` apply to SQL editor runs (`execute_batch`);
+ * 0 turns either off. `s3PreviewMaxBytes` is read by the StorageFileViewer,
+ * via the StorageBrowser's preview pane.
  *
  * AI config: `ai.apiKey` is stored SEALED (encrypted with the per-device KEK,
  * same pattern as S3 secret keys). It persists safely because the value in
@@ -18,9 +17,9 @@ import { EMPTY_AI_CONFIG, type AIConfig, type AIProvider } from '../core/ai/type
  * client during a request.
  */
 interface SettingsState {
-  /** Max rows returned by a SELECT (UI control; not yet enforced by executor). */
+  /** Max rows kept per SQL editor result; 0 keeps all rows. */
   rowLimit: number;
-  /** Query execution timeout in seconds (UI control; not yet enforced). */
+  /** Per-statement timeout for SQL editor runs, in seconds; 0 = none. */
   execTimeoutSec: number;
   /** Max bytes fetched for in-app S3 file preview. Larger files refuse preview. */
   s3PreviewMaxBytes: number;
@@ -93,7 +92,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       rowLimit: 1000,
-      execTimeoutSec: 30,
+      execTimeoutSec: 0,
       s3PreviewMaxBytes: FIVE_MB,
       showSystemSchemas: false,
       showRowCounts: true,
@@ -105,8 +104,8 @@ export const useSettingsStore = create<SettingsState>()(
       analyticsEnabled: true,
       ai: { ...EMPTY_AI_CONFIG },
 
-      setRowLimit: (n) => set({ rowLimit: clampPositive(n, 1000) }),
-      setExecTimeoutSec: (n) => set({ execTimeoutSec: clampPositive(n, 30) }),
+      setRowLimit: (n) => set({ rowLimit: clampNonNegative(n, 1000) }),
+      setExecTimeoutSec: (n) => set({ execTimeoutSec: clampNonNegative(n, 0) }),
       setS3PreviewMaxBytes: (n) => set({ s3PreviewMaxBytes: clampPositive(n, FIVE_MB) }),
       setShowSystemSchemas: (v) => set({ showSystemSchemas: v }),
       setShowRowCounts: (v) => set({ showRowCounts: v }),
@@ -139,9 +138,24 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'rdsql_settings_v1',
       storage: createJSONStorage(() => localStorage),
+      version: 1,
+      migrate: (persisted, version) => {
+        const state = (persisted ?? {}) as Partial<SettingsState>;
+        // Before v1 the timeout was stored but never applied, with a default
+        // of 30s. Keep runs unlimited for anyone still on that default, so
+        // starting to enforce it doesn't cut off their long queries.
+        if (version < 1 && state.execTimeoutSec === 30) state.execTimeoutSec = 0;
+        return state as SettingsState;
+      },
     },
   ),
 );
+
+/** Clamp to a non-negative integer with a fallback. */
+function clampNonNegative(n: number, fallback: number): number {
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}
 
 /** Clamp to a positive integer with a fallback. */
 function clampPositive(n: number, fallback: number): number {

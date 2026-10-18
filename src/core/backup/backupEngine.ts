@@ -39,10 +39,9 @@ export interface BackupEngineCapabilities {
  * separate question answered by the schema metadata — this capability only
  * says we cannot disable enforcement, not that FKs never exist.
  *
- * SQLite: `PRAGMA foreign_keys = OFF` is per-connection. Since `execute_query`
- * opens a new connection per call, the pragma must be re-issued before the
- * data phase and will not persist to the next connection. The executor handles
- * this by executing the pragma in the same batch as the data statements.
+ * SQLite: `PRAGMA foreign_keys = OFF` is per-connection, like MySQL's and
+ * Postgres' settings above. Restore runs every statement on one backend
+ * session (`session_open`), so the setting stays in effect for the data phase.
  */
 export function getEngineCapabilities(engine: DatabaseEngine): BackupEngineCapabilities {
   switch (engine) {

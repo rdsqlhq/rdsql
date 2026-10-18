@@ -1,6 +1,6 @@
 pub mod commands;
 
-use commands::query::QueryRegistry;
+use commands::query::{QueryRegistry, SessionRegistry};
 use commands::s3::TransferRegistry;
 use commands::backend::PendingLogin;
 use commands::migrate::MigrationRegistry;
@@ -40,6 +40,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_deep_link::init())
         .manage(Arc::new(Mutex::new(HashMap::new())) as QueryRegistry)
+        // Open database sessions that span several IPC calls (restore).
+        .manage(SessionRegistry(Arc::new(Mutex::new(HashMap::new()))))
         // Transfer registry for cancellable S3 uploads/downloads. Same shape as
         // the query registry; lives independently so the two never collide.
         .manage(TransferRegistry(Arc::new(Mutex::new(HashMap::new()))))
@@ -342,6 +344,10 @@ pub fn run() {
             commands::connection::fetch_schema_tree,
             commands::ssh_tunnel::test_ssh_connection,
             commands::query::execute_query,
+            commands::query::execute_batch,
+            commands::query::session_open,
+            commands::query::session_execute,
+            commands::query::session_close,
             commands::query::cancel_query,
             commands::transfer::export_table_data,
             commands::storage::save_secure_credential,

@@ -17,6 +17,7 @@ import { useTabStore } from '../../store/useTabStore';
 import { useConnectionStore } from '../../store/useConnectionStore';
 import { useToastStore } from '../../store/useToastStore';
 import { safeInvoke } from '../../core/tauri/ipc';
+import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import {
   QueryResultData,
@@ -30,15 +31,12 @@ import { compareCells, applyFilters, cellToText, measureTextWidth, type FilterCo
 import { FilterDrawer, type FilterColumn } from '../table/FilterDrawer';
 import { useColumnResize } from '../table/useColumnResize';
 import { quoteIdent, qualifiedTable, resolveTargetDatabase } from '../../core/sql/ident';
+import { cellLiteral } from '../../core/backup/backupSql';
+import { applyGridChanges, type ApplyOutcome } from '../../core/sql/applyChanges';
 import { ApplyChangesModal, PendingChange } from './ApplyChangesModal';
 
 type CellValue = string | number | boolean | null;
 type RowData = CellValue[];
-
-function sqlLiteral(value: CellValue | undefined): string {
-  if (value === null || value === undefined) return 'NULL';
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
 
 interface NewRow {
   tempId: string;
@@ -211,6 +209,7 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
         editableTableName={canEdit ? editableTable!.name : undefined}
         onEnterEdit={canEdit ? () => setIsEditMode(true) : undefined}
         storageKey={canEdit ? `${activeConn!.id}_${activeDb || 'default'}_${editableTable!.name}` : undefined}
+        truncatedAt={resultSet.truncatedAt}
       />
     );
   }
@@ -218,6 +217,9 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
   // ---- Editable path ------------------------------------------------------
   const allRows: RowData[] = result.rows || [];
   const idColumns = pkColumns.length > 0 ? pkColumns : result.columns.map((c) => c.name);
+  // With every primary-key column in the result, a WHERE on them matches one
+  // row. Otherwise each change is checked to match exactly one row first.
+  const hasFullKey = pkColumns.length > 0 && pkColumns.every((pk) => result.columns.some((c) => c.name === pk));
   // (newRows / insert-row feature removed from the SQL result grid — inserts
   // are done via the SQL editor. Only updates + deletes stage pending changes.)
   const pendingCount = pendingUpdates.size + pendingDeletes.size;
@@ -275,22 +277,31 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
           // `col = NULL` never matches in SQL (three-valued logic) — a row
           // whose identifying column is NULL would silently match zero rows,
           // so the edit looks applied (no error) but reverts on refresh.
-          return val === null || val === undefined ? `${q(colName)} IS NULL` : `${q(colName)} = ${sqlLiteral(val)}`;
+          return val === null || val === undefined ? `${q(colName)} IS NULL` : `${q(colName)} = ${cellLiteral(val, activeConn.engine)}`;
         })
         .join(' AND ');
 
+    const guardFor = (row: RowData) =>
+      hasFullKey ? undefined : `SELECT COUNT(*) FROM ${tableIdent} WHERE ${whereFor(row)}`;
+
     pendingDeletes.forEach((row) => {
-      changes.push({ kind: 'delete', sql: `DELETE FROM ${tableIdent} WHERE ${whereFor(row)};`, label: editableTable.name });
+      changes.push({
+        kind: 'delete',
+        sql: `DELETE FROM ${tableIdent} WHERE ${whereFor(row)};`,
+        label: editableTable.name,
+        guardSql: guardFor(row),
+      });
     });
 
     pendingUpdates.forEach((rowEdits, row) => {
       if (pendingDeletes.has(row)) return;
-      const setParts = Object.entries(rowEdits).map(([col, val]) => `${q(col)} = ${sqlLiteral(val)}`);
+      const setParts = Object.entries(rowEdits).map(([col, val]) => `${q(col)} = ${cellLiteral(val, activeConn.engine)}`);
       if (setParts.length === 0) return;
       changes.push({
         kind: 'update',
         sql: `UPDATE ${tableIdent} SET ${setParts.join(', ')} WHERE ${whereFor(row)};`,
         label: editableTable.name,
+        guardSql: guardFor(row),
       });
     });
 
@@ -325,29 +336,16 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
     setApplying(true);
     setApplyError(null);
 
-    let failure: string | null = null;
-    let unmatchedCount = 0;
-    for (const [stmtIdx, change] of changes.entries()) {
-      try {
-        const res = await safeInvoke<{ affected_rows?: number }>('execute_query', {
-          request: { config: queryConfig, sql: change.sql },
-          queryId: `crud_${editableTable.name}_${stmtIdx}_${Date.now()}`,
-          __meta: { source: 'table' },
-        });
-        // A no-op UPDATE/DELETE (WHERE matched nothing) doesn't throw — it
-        // looks identical to success unless we check affected_rows.
-        if ((change.kind === 'update' || change.kind === 'delete') && res.affected_rows === 0) {
-          unmatchedCount += 1;
-        }
-      } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        failure = errMsg;
-        break;
-      }
+    let outcome: ApplyOutcome;
+    try {
+      outcome = await applyGridChanges(queryConfig ?? activeConn, changes, `crud_${editableTable.name}`);
+    } catch (err: any) {
+      outcome = { error: err?.message || String(err), unmatched: 0 };
     }
+    const unmatchedCount = outcome.unmatched;
 
-    if (failure) {
-      setApplyError(failure);
+    if (outcome.error) {
+      setApplyError(outcome.error);
       setApplying(false);
       return;
     }
@@ -373,14 +371,15 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
 
   return (
     <div className="flex flex-col h-full">
+      <TruncatedNotice limit={resultSet.truncatedAt} />
       {/* Pending-change bar */}
       {pendingCount > 0 && (
         <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-950/20 border-b border-amber-500/30 text-xs shrink-0">
           <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
           <span className="text-amber-300 font-medium">{pendingCount} pending change{pendingCount === 1 ? '' : 's'}</span>
-          {pkColumns.length === 0 && (
+          {!hasFullKey && (
             <span className="text-amber-400/80 hidden md:inline">
-              · no primary key — updates/deletes match all column values
+              · {pkColumns.length === 0 ? 'no primary key' : 'primary key not in result'} — each change must match exactly one row
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
@@ -566,6 +565,24 @@ const ROW_HEIGHT = 26; // px — matches the rendered row (py-1 + text-[11px] li
 // as the dark container background and looks like a blank/black flash).
 const OVERSCAN = 24;
 
+/** Shown when the row limit cut a result off. */
+const TruncatedNotice: React.FC<{ limit?: number }> = ({ limit }) => {
+  const setSettingsModalOpen = useWorkspaceStore((s) => s.setSettingsModalOpen);
+  if (!limit) return null;
+  return (
+    <div className="flex items-center gap-2 px-3 py-1 border-b border-amber-500/30 bg-amber-950/20 text-[10.5px] text-amber-300 shrink-0">
+      <AlertTriangle className="w-3 h-3 shrink-0" />
+      <span>Showing the first {limit.toLocaleString()} rows. The query returned more.</span>
+      <button
+        onClick={() => setSettingsModalOpen(true, 'query')}
+        className="ml-auto underline decoration-dotted hover:text-amber-200"
+      >
+        Change row limit
+      </button>
+    </div>
+  );
+};
+
 const ReadOnlyGrid: React.FC<{
   result: QueryResultData;
   statement: string;
@@ -576,7 +593,8 @@ const ReadOnlyGrid: React.FC<{
   /** Stable key for persisting column widths + hidden columns. Omit to
    *  disable persistence. */
   storageKey?: string;
-}> = ({ result, statement, editableTableName, onEnterEdit, storageKey }) => {
+  truncatedAt?: number;
+}> = ({ result, statement, editableTableName, onEnterEdit, storageKey, truncatedAt }) => {
   const allRows = result.rows ?? [];
   const rowCount = allRows.length;
   const isReadOnlySelect = statement.trim().toUpperCase().startsWith('SELECT');
@@ -769,6 +787,7 @@ const ReadOnlyGrid: React.FC<{
 
   return (
     <div className="flex flex-col h-full">
+      <TruncatedNotice limit={truncatedAt} />
       <div className="flex items-center gap-2 px-3 py-1 border-b border-[#1e293b] bg-[#080c14] shrink-0 text-[10.5px]">
         <span className="text-slate-600 font-mono">
           {result.execution_time_ms}ms

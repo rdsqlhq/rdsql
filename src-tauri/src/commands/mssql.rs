@@ -435,8 +435,19 @@ fn mssql_cell_to_json(data: &ColumnData<'static>) -> serde_json::Value {
 /// affected-rows count, matching the DML/DDL path used by every other
 /// engine's `run_query` arm.
 pub async fn run_mssql_query(config: &ConnectionConfig, sql: &str) -> Result<QueryResult, String> {
-    let start = Instant::now();
     let mut client = connect(config).await?;
+    run_mssql_on(&mut client, sql).await
+}
+
+pub type MssqlClient = Client<Compat<TcpStream>>;
+
+pub async fn connect_session(config: &ConnectionConfig) -> Result<MssqlClient, String> {
+    connect(config).await
+}
+
+/// Runs one statement on an already-open client (see `run_duckdb_on`).
+pub async fn run_mssql_on(client: &mut MssqlClient, sql: &str) -> Result<QueryResult, String> {
+    let start = Instant::now();
 
     let upper = sql.trim_start().to_uppercase();
     let is_select = upper.starts_with("SELECT")

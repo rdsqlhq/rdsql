@@ -39,6 +39,8 @@ import { RowCompareModal } from './RowCompareModal';
 import { RelationTarget, buildTableRelationInfo } from './relationHelpers';
 import { type FilterCondition } from './cellUtils';
 import { quoteIdent, qualifiedTable, selectPreviewSql, paginatedSelectSql, resolveTargetDatabase } from '../../core/sql/ident';
+import { cellLiteral } from '../../core/backup/backupSql';
+import { applyGridChanges, type ApplyOutcome, type GridChange } from '../../core/sql/applyChanges';
 import { fetchTableIndexes, fetchTableForeignKeys } from '../../core/sql/indexIntrospection';
 import { parseDbError, errorKindLabel, errorKindColor, formatDbErrorTrace } from '../../core/sql/dbError';
 import { QueryResultData } from '../../core/domain/types';
@@ -52,11 +54,6 @@ const MAX_PAGE_SIZE = 100_000;
 
 type CellValue = string | number | boolean | null;
 type RowData = CellValue[];
-
-function sqlLiteral(value: CellValue | undefined): string {
-  if (value === null || value === undefined) return 'NULL';
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
 
 function toCsvField(value: CellValue): string {
   if (value === null || value === undefined) return '';
@@ -749,7 +746,7 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
     const values = rowValuesForMenu(cellContextMenu.row);
     const cols = result.columns.map((c) => c.name);
     const colNames = cols.map((c) => q(c)).join(', ');
-    const colVals = cols.map((c) => sqlLiteral(values[c])).join(', ');
+    const colVals = cols.map((c) => cellLiteral(values[c], activeConn.engine)).join(', ');
     const target = qualifiedTable(activeConn.engine, tab.tableName, tab.schemaName);
     void copyToClipboard(`INSERT INTO ${target} (${colNames}) VALUES (${colVals});`);
     closeCellMenu();
@@ -861,7 +858,12 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
 
     const q = (name: string) => quoteIdent(activeConn.engine, name);
     const tableIdent = qualifiedTable(activeConn.engine, tab.tableName, tab.schemaName);
-    const stmts: string[] = [];
+    const stmts: GridChange[] = [];
+    // With every primary-key column in the result, a WHERE on them matches one
+    // row. Otherwise each change is checked to match exactly one row first.
+    const hasFullKey = pkColumns.length > 0 && pkColumns.every((pk) => result.columns.some((c) => c.name === pk));
+    const guardFor = (row: RowData) =>
+      hasFullKey ? undefined : `SELECT COUNT(*) FROM ${tableIdent} WHERE ${whereFor(row)}`;
 
     const whereFor = (row: RowData) =>
       idColumns
@@ -871,27 +873,32 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
           // `col = NULL` never matches in SQL (three-valued logic) — a row
           // whose identifying column is NULL would silently match zero rows,
           // so the edit looks applied (no error) but reverts on refresh.
-          return val === null || val === undefined ? `${q(colName)} IS NULL` : `${q(colName)} = ${sqlLiteral(val)}`;
+          return val === null || val === undefined ? `${q(colName)} IS NULL` : `${q(colName)} = ${cellLiteral(val, activeConn.engine)}`;
         })
         .join(' AND ');
 
     pendingDeletes.forEach((row) => {
-      stmts.push(`DELETE FROM ${tableIdent} WHERE ${whereFor(row)};`);
+      stmts.push({ kind: 'delete', sql: `DELETE FROM ${tableIdent} WHERE ${whereFor(row)};`, label: tab.tableName, guardSql: guardFor(row) });
     });
 
     pendingUpdates.forEach((changes, row) => {
       if (pendingDeletes.has(row)) return;
-      const setParts = Object.entries(changes).map(([col, val]) => `${q(col)} = ${sqlLiteral(val)}`);
+      const setParts = Object.entries(changes).map(([col, val]) => `${q(col)} = ${cellLiteral(val, activeConn.engine)}`);
       if (setParts.length === 0) return;
-      stmts.push(`UPDATE ${tableIdent} SET ${setParts.join(', ')} WHERE ${whereFor(row)};`);
+      stmts.push({
+        kind: 'update',
+        sql: `UPDATE ${tableIdent} SET ${setParts.join(', ')} WHERE ${whereFor(row)};`,
+        label: tab.tableName,
+        guardSql: guardFor(row),
+      });
     });
 
     newRows.forEach(({ values }) => {
       const cols = Object.keys(values).filter((c) => values[c] !== null && values[c] !== '');
       if (cols.length === 0) return;
       const colNames = cols.map((c) => q(c)).join(', ');
-      const colVals = cols.map((c) => sqlLiteral(values[c])).join(', ');
-      stmts.push(`INSERT INTO ${tableIdent} (${colNames}) VALUES (${colVals});`);
+      const colVals = cols.map((c) => cellLiteral(values[c], activeConn.engine)).join(', ');
+      stmts.push({ kind: 'insert', sql: `INSERT INTO ${tableIdent} (${colNames}) VALUES (${colVals});`, label: tab.tableName });
     });
 
     if (stmts.length === 0) {
@@ -902,33 +909,16 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
     // Every INSERT/UPDATE/DELETE the grid runs gets recorded by the IPC layer
     // via `__meta: { source: 'table' }`, so it shows up in Query Log & History
     // (and, if it fails, in the Errors tab) — not just the refresh SELECT.
-    let failure: string | null = null;
-    let unmatchedCount = 0;
-    for (const [stmtIdx, stmt] of stmts.entries()) {
-      try {
-        const res = await safeInvoke<{ affected_rows?: number }>('execute_query', {
-          request: { config: queryConfig, sql: stmt },
-          queryId: `crud_${tab.tableName}_${stmtIdx}_${Date.now()}`,
-          __meta: { source: 'table' },
-        });
-        // A no-op UPDATE/DELETE (WHERE matched nothing) doesn't throw — it
-        // looks identical to success unless we check affected_rows. Without
-        // this, a stale/mismatched WHERE clause (e.g. an editable result
-        // grid whose data shifted, or an identifying column that's NULL)
-        // silently discards the edit: no error shown, and the refresh below
-        // just re-displays the unchanged row.
-        if ((stmt.startsWith('UPDATE ') || stmt.startsWith('DELETE ')) && res.affected_rows === 0) {
-          unmatchedCount += 1;
-        }
-      } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        failure = errMsg;
-        break;
-      }
+    let outcome: ApplyOutcome;
+    try {
+      outcome = await applyGridChanges(queryConfig ?? activeConn, stmts, `crud_${tab.tableName}`);
+    } catch (err: any) {
+      outcome = { error: err?.message || String(err), unmatched: 0 };
     }
+    const unmatchedCount = outcome.unmatched;
 
-    if (failure) {
-      setApplyError(failure);
+    if (outcome.error) {
+      setApplyError(outcome.error);
       setApplying(false);
       return;
     }
