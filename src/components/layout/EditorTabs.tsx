@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, FileCode, Table as TableIcon, XCircle, ChevronsRight, GitFork, Cloud, FolderOpen, Key, FileJson } from 'lucide-react';
 import { useTabStore } from '../../store/useTabStore';
 import { useToastStore } from '../../store/useToastStore';
@@ -10,7 +10,13 @@ import type { QueryTab } from '../../core/domain/types';
 
 /** A SQL editor tab counts as "has content" when it holds typed SQL — closing
  *  it without asking would silently discard text the user never ran/saved. */
-const hasUnclosedSql = (tab: QueryTab) => tab.tabType === 'sql_editor' && tab.sql.trim() !== '';
+/** A SQL tab whose text would be lost on close: edited since the last save,
+ *  or never saved to a file. */
+const hasUnclosedSql = (tab: QueryTab) =>
+  tab.tabType === 'sql_editor' && tab.sql.trim() !== '' && (!!tab.isDirty || !tab.filePath);
+
+/** Fired by File → Close Tab (Cmd/Ctrl+W). */
+export const CLOSE_ACTIVE_TAB_EVENT = 'rdsql:close-active-tab';
 
 export const EditorTabs: React.FC = () => {
   const { tabs, activeTabId, setActiveTab, closeTab, openSqlTab, openRedisBrowserTab, closeAllTabs, closeTabsToRight, closeOtherTabs, reorderTabs } = useTabStore();
@@ -33,6 +39,17 @@ export const EditorTabs: React.FC = () => {
       closeTab(tabId);
     }
   };
+
+  const requestCloseRef = useRef(requestCloseTab);
+  requestCloseRef.current = requestCloseTab;
+  useEffect(() => {
+    const onClose = () => {
+      const id = useTabStore.getState().activeTabId;
+      if (id) requestCloseRef.current(id);
+    };
+    window.addEventListener(CLOSE_ACTIVE_TAB_EVENT, onClose);
+    return () => window.removeEventListener(CLOSE_ACTIVE_TAB_EVENT, onClose);
+  }, []);
 
   const requestCloseTabsToRight = (tabId: string) => {
     const idx = tabs.findIndex((t) => t.id === tabId);
@@ -162,17 +179,16 @@ export const EditorTabs: React.FC = () => {
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
               )}
 
-              {tabs.length > 1 && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    requestCloseTab(tab.id);
-                  }}
-                  className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-slate-200 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  requestCloseTab(tab.id);
+                }}
+                title="Close tab (Ctrl/Cmd+W)"
+                className="p-0.5 rounded hover:bg-[#1e293b] text-slate-500 hover:text-slate-200 opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <X className="w-3 h-3" />
+              </button>
             </div>
           );
         })}

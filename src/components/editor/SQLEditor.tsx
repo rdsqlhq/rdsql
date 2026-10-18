@@ -31,8 +31,11 @@ import {
   buildSchemaSuggestions,
   tablesInScope,
   qualifiedTokenBeforeDot,
+  statementAround,
+  tableAliases,
 } from '../../core/sql/completion';
 import { formatSql } from '../../core/sql/format';
+import { saveExport, EXPORT_EVENT, type ExportEventDetail } from '../../core/export/resultExport';
 
 interface SQLEditorProps {
   tabId: string;
@@ -89,7 +92,11 @@ function ensureCompletionProvider(monaco: MonacoNS) {
       });
       const afterDot = /\.\s*$/.test(textUntil.slice(-2));
       const dotPath = qualifiedTokenBeforeDot(textUntil);
-      const scoped = tablesInScope(textUntil);
+      // FROM/JOIN usually comes after the cursor (`SELECT u.| FROM users u`),
+      // so read the whole statement the cursor is in, not just what precedes it.
+      const statement = statementAround(model.getValue(), model.getOffsetAt(position));
+      const scoped = tablesInScope(statement);
+      const aliases = tableAliases(statement);
       const seen = new Set<string>();
       const sugg = sharedSchemaRef.current;
 
@@ -130,6 +137,24 @@ function ensureCompletionProvider(monaco: MonacoNS) {
         // table still gets columns.
         const tok = dotPath[0].toLowerCase();
         const tokDisplay = dotPath[0];
+        // Alias? → columns of the table it names.
+        const aliased = aliases.get(tok);
+        if (aliased) {
+          const cols =
+            (aliased.schema && sugg.columnsByDbTable.get(`${aliased.schema.toLowerCase()}.${aliased.table.toLowerCase()}`)) ||
+            sugg.columnsByTable.get(aliased.table.toLowerCase()) ||
+            [];
+          for (const col of cols) {
+            push({
+              label: col,
+              kind: monaco.languages.CompletionItemKind.Field,
+              insertText: col,
+              detail: `column · ${aliased.table}`,
+              range,
+            } as MonacoLanguagesNS.CompletionItem);
+          }
+          return { suggestions };
+        }
         // Table? → columns.
         if (sugg.columnsByTable.has(tok)) {
           const cols = sugg.columnsByTable.get(tok) || [];
@@ -238,6 +263,11 @@ function ensureCompletionProvider(monaco: MonacoNS) {
   });
 }
 
+const MODEL_PREFIX = '/rdsql-tabs/';
+const modelPathForTab = (tabId: string) => `file://${MODEL_PREFIX}${tabId}.sql`;
+const tabIdFromModelPath = (path: string) =>
+  path.startsWith(MODEL_PREFIX) ? path.slice(MODEL_PREFIX.length).replace(/\.sql$/, '') : null;
+
 export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
   const { tabs, updateTabSql, executeQuery, stopQuery, setTabConnection, setTabSchema, setTabFilePath } =
     useTabStore();
@@ -254,7 +284,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
   const { logs } = useQueryLogStore();
   const ai = useSettingsStore((s) => s.ai);
   const aiReady = isAIConfigured(ai);
-  const { zoomLevel, setAIPanelOpen, isAIPanelOpen } = useWorkspaceStore();
+  const { zoomLevel, setAIPanelOpen, isAIPanelOpen, setSettingsModalOpen } = useWorkspaceStore();
 
   const tab = tabs.find((t) => t.id === tabId);
   // Resolve the connection from the tab's own binding so each editor runs
@@ -439,6 +469,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       const current = useTabStore.getState().tabs.find((t) => t.id === tabId);
       if (current?.filePath) {
         await writeTextFile(current.filePath, sql);
+        setTabFilePath(tabId, current.filePath, current.title);
         pushToast({ severity: 'success', title: 'Saved', message: current.filePath });
       } else {
         await saveAs(sql);
@@ -456,8 +487,8 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
     // completion provider in onMount so it can read live schema data.
   };
 
-  // The Monaco editor instance is shared across every SQL tab (see the
-  // `lastSyncedTab` effect below) and `onMount` only ever fires once, the
+  // The Monaco editor instance is shared across every SQL tab (each tab only
+  // swaps in its own model) and `onMount` only ever fires once, the
   // first time the editor mounts. The `editor.addAction` callbacks registered
   // inside it are created in that same one-time render, so if they closed
   // over `tabId`/`tab`/`running`/`activeConn`/`runSelectionOrAll`/`handleSave`
@@ -467,8 +498,8 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
   // block) appear to do nothing, or act on the wrong tab. Routing the actions
   // through this ref — reassigned on every render — makes them always call
   // the current render's versions instead.
-  const latestRef = useRef({ runSelectionOrAll, handleSave, stopQuery, tabId, activeConn, refreshSchema });
-  latestRef.current = { runSelectionOrAll, handleSave, stopQuery, tabId, activeConn, refreshSchema };
+  const latestRef = useRef({ runSelectionOrAll, handleSave, stopQuery, tabId, activeConn, refreshSchema, aiReady });
+  latestRef.current = { runSelectionOrAll, handleSave, stopQuery, tabId, activeConn, refreshSchema, aiReady };
 
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -526,17 +557,18 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
       },
     });
 
-    // Only registered when a provider is configured — same gating as the
-    // toolbar button, so the menu never shows a dead entry.
-    if (aiReady) {
-      editor.addAction({
-        id: 'ask-ai',
-        label: 'Ask AI',
-        contextMenuGroupId: 'rdsql',
-        contextMenuOrder: 5,
-        run: () => setAIPanelOpen(true),
-      });
-    }
+    // Registered once, so it can't follow later changes to the AI settings:
+    // without a configured provider it opens the AI settings instead.
+    editor.addAction({
+      id: 'ask-ai',
+      label: 'Ask AI',
+      contextMenuGroupId: 'rdsql',
+      contextMenuOrder: 5,
+      run: () => {
+        if (latestRef.current.aiReady) setAIPanelOpen(true);
+        else setSettingsModalOpen(true, 'ai');
+      },
+    });
 
     // Register our SQL completion provider exactly once per Monaco instance.
     // It reads live schema data from the module-level sharedSchemaRef, which
@@ -545,18 +577,44 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
     ensureCompletionProvider(monaco as MonacoNS);
   };
 
-  // When the tab id changes (switching tabs), sync the editor value from the
-  // store so Monaco shows the right buffer. We deliberately do NOT push every
-  // keystroke back through setValue — that would reset undo/redo history.
-  const lastSyncedTab = useRef<string | null>(null);
+  // Each tab gets its own Monaco model (see `path` on <Editor>), so undo
+  // history, cursor and scroll stay with their tab. Models of closed tabs are
+  // disposed here.
+  const openTabIds = tabs.map((t) => t.id).join('|');
   useEffect(() => {
-    if (lastSyncedTab.current === tabId) return;
-    lastSyncedTab.current = tabId;
-    const ed = editorRef.current;
-    if (ed && tab && ed.getValue() !== tab.sql) {
-      ed.setValue(tab.sql || '');
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+    const open = new Set(openTabIds.split('|'));
+    for (const model of monaco.editor.getModels()) {
+      const id = tabIdFromModelPath(model.uri.path);
+      if (id && !open.has(id)) model.dispose();
     }
-  }, [tabId, tab]);
+  }, [openTabIds]);
+
+  // File → Export → Table Data, while this SQL tab is active: exports the
+  // first result set that has columns.
+  useEffect(() => {
+    const onExport = (e: Event) => {
+      const detail = (e as CustomEvent<ExportEventDetail>).detail;
+      if (detail.handled) return;
+      const current = useTabStore.getState().tabs.find((t) => t.id === tabId);
+      const rs = current?.resultSets?.find((r) => r.status === 'success' && r.result?.columns.length);
+      if (!rs?.result) return;
+      detail.handled = true;
+      const conn = useConnectionStore.getState().connections.find((c) => c.id === current?.connectionId);
+      void saveExport(detail.format, {
+        engine: conn?.engine ?? 'postgres',
+        tableName: rs.editableTable?.name ?? 'query_result',
+        schemaName: rs.editableTable?.schema,
+        columns: rs.result.columns,
+        rows: rs.result.rows,
+      })
+        .then((path) => path && pushToast({ severity: 'success', title: 'Exported', message: path }))
+        .catch((err: any) => pushToast({ severity: 'error', title: 'Export failed', message: err?.message || String(err) }));
+    };
+    window.addEventListener(EXPORT_EVENT, onExport);
+    return () => window.removeEventListener(EXPORT_EVENT, onExport);
+  }, [tabId, pushToast]);
 
   if (!tab) return null;
 
@@ -909,6 +967,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
           height="100%"
           defaultLanguage="sql"
           theme="vs-dark"
+          path={modelPathForTab(tabId)}
           value={tab.sql}
           beforeMount={beforeMount}
           onMount={onMount}

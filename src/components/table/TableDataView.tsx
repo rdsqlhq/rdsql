@@ -30,8 +30,8 @@ import { useTabStore } from '../../store/useTabStore';
 import { useConnectionStore } from '../../store/useConnectionStore';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { safeInvoke } from '../../core/tauri/ipc';
-import { save } from '@tauri-apps/plugin-dialog';
-import { writeTextFile } from '@tauri-apps/plugin-fs';
+import { saveExport, EXPORT_EVENT, type ExportFormat, type ExportEventDetail } from '../../core/export/resultExport';
+import { ExportMenu } from '../common/ExportMenu';
 import { isJsonType, cellToEditableString, CELL_INPUT_HEIGHT_CLASS } from './TypedCellInput';
 import { CellEditorModal } from './CellEditorModal';
 import { DataGrid } from './DataGrid';
@@ -753,36 +753,48 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
   };
 
   const [exporting, setExporting] = useState(false);
-  const handleExportCsv = async () => {
-    if (!result || exporting) return;
+  /** Exports the whole table (not just the visible page), in the grid's
+   *  current sort order. */
+  const handleExport = async (format: ExportFormat) => {
+    if (!activeConn || !tab.tableName || exporting) return;
     setExporting(true);
     try {
-      // Build CSV from the current page's columns + rows.
-      const header = result.columns.map((c) => toCsvField(c.name)).join(',');
-      const body = (result.rows || [])
-        .map((row) => {
-          const values = rowValuesForMenu(row);
-          return result.columns.map((c) => toCsvField(values[c.name])).join(',');
-        })
-        .join('\n');
-      const csv = `${header}\n${body}`;
-
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const defaultName = `${tab.tableName}_${stamp}.csv`;
-      const path = await save({
-        title: 'Export CSV',
-        defaultPath: defaultName,
-        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      const orderClause = gridSort
+        ? ` ORDER BY ${quoteIdent(engine, gridSort.column)} ${gridSort.dir === 'desc' ? 'DESC' : 'ASC'}`
+        : '';
+      const sql = `SELECT * FROM ${qualifiedTable(engine, tab.tableName, activeDb)}${orderClause};`;
+      const res = await safeInvoke<QueryResultData>('execute_query', {
+        request: { config: queryConfig, sql },
+        queryId: `export_${tab.tableName}_${Date.now()}`,
       });
-      if (!path) return; // user cancelled
-      await writeTextFile(path, csv);
+      const path = await saveExport(format, {
+        engine,
+        tableName: tab.tableName,
+        schemaName: tab.schemaName,
+        columns: res.columns,
+        rows: res.rows,
+      });
+      if (path) pushToast({ severity: 'success', title: `Exported ${res.rows.length.toLocaleString()} rows`, message: path });
     } catch (err: any) {
-      console.error('CSV export failed:', err);
-      alert(`Failed to export CSV: ${err?.message || err}`);
+      pushToast({ severity: 'error', title: 'Export failed', message: err?.message || String(err) });
     } finally {
       setExporting(false);
     }
   };
+  const handleExportRef = useRef(handleExport);
+  handleExportRef.current = handleExport;
+
+  // File → Export → Table Data, while this table is the active tab.
+  useEffect(() => {
+    const onExport = (e: Event) => {
+      const detail = (e as CustomEvent<ExportEventDetail>).detail;
+      if (detail.handled) return;
+      detail.handled = true;
+      void handleExportRef.current(detail.format);
+    };
+    window.addEventListener(EXPORT_EVENT, onExport);
+    return () => window.removeEventListener(EXPORT_EVENT, onExport);
+  }, []);
 
   const handleDuplicateRowFromMenu = () => {
     if (!cellContextMenu || !result) return;
@@ -1018,14 +1030,12 @@ export const TableDataView: React.FC<{ tabId: string }> = ({ tabId }) => {
             <FileCode className="w-3.5 h-3.5 text-blue-400" />
           </button>
 
-          <button
-            onClick={handleExportCsv}
-            disabled={!result || exporting}
-            className="p-1 rounded-lg hover:bg-[#1e293b] disabled:opacity-50 disabled:cursor-not-allowed text-slate-400 transition-colors shrink-0"
-            title={exporting ? 'Exporting…' : 'Export CSV'}
-          >
-            <Download className="w-3.5 h-3.5" />
-          </button>
+          <ExportMenu
+            onExport={(f) => void handleExport(f)}
+            disabled={!result}
+            busy={exporting}
+            title="Export the whole table"
+          />
 
           {/* Advanced filter (opens drawer) — sits next to Refresh. */}
           <button

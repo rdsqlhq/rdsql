@@ -18,6 +18,9 @@ import { useConnectionStore } from '../../store/useConnectionStore';
 import { useToastStore } from '../../store/useToastStore';
 import { safeInvoke } from '../../core/tauri/ipc';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
+import { ExportMenu } from '../common/ExportMenu';
+import { saveExport, toTsv } from '../../core/export/resultExport';
+import { copyToClipboard } from '../../core/utils/clipboard';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import {
   QueryResultData,
@@ -210,6 +213,7 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
         onEnterEdit={canEdit ? () => setIsEditMode(true) : undefined}
         storageKey={canEdit ? `${activeConn!.id}_${activeDb || 'default'}_${editableTable!.name}` : undefined}
         truncatedAt={resultSet.truncatedAt}
+        engine={activeConn?.engine ?? 'postgres'}
       />
     );
   }
@@ -431,6 +435,7 @@ export const ResultGrid: React.FC<ResultGridProps> = ({ tabId, resultSet }) => {
           </span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
+          <ResultExportButton result={result} tableName={editableTable.name} engine={activeConn.engine} />
           {/* Advanced filter — sits next to Refresh. */}
           <button
             onClick={() => setGridFilterOpen((v) => !v)}
@@ -565,6 +570,44 @@ const ROW_HEIGHT = 26; // px — matches the rendered row (py-1 + text-[11px] li
 // as the dark container background and looks like a blank/black flash).
 const OVERSCAN = 24;
 
+/** Copy/export for a result set. Exports the rows as returned by the query. */
+const ResultExportButton: React.FC<{ result: QueryResultData; tableName?: string; engine: string }> = ({
+  result,
+  tableName,
+  engine,
+}) => {
+  const pushToast = useToastStore((s) => s.push);
+  const [busy, setBusy] = useState(false);
+  const source = { engine, tableName: tableName || 'query_result', columns: result.columns, rows: result.rows ?? [] };
+  return (
+    <ExportMenu
+      busy={busy}
+      disabled={!result.columns.length}
+      title="Copy or export these rows"
+      onCopy={() => {
+        void copyToClipboard(toTsv(source.columns, source.rows)).then((ok) =>
+          pushToast(
+            ok
+              ? { severity: 'success', title: `Copied ${source.rows.length.toLocaleString()} rows` }
+              : { severity: 'error', title: 'Could not copy to the clipboard' },
+          ),
+        );
+      }}
+      onExport={async (format) => {
+        setBusy(true);
+        try {
+          const path = await saveExport(format, source);
+          if (path) pushToast({ severity: 'success', title: `Exported ${source.rows.length.toLocaleString()} rows`, message: path });
+        } catch (err: any) {
+          pushToast({ severity: 'error', title: 'Export failed', message: err?.message || String(err) });
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
+  );
+};
+
 /** Shown when the row limit cut a result off. */
 const TruncatedNotice: React.FC<{ limit?: number }> = ({ limit }) => {
   const setSettingsModalOpen = useWorkspaceStore((s) => s.setSettingsModalOpen);
@@ -594,7 +637,8 @@ const ReadOnlyGrid: React.FC<{
    *  disable persistence. */
   storageKey?: string;
   truncatedAt?: number;
-}> = ({ result, statement, editableTableName, onEnterEdit, storageKey, truncatedAt }) => {
+  engine: string;
+}> = ({ result, statement, editableTableName, onEnterEdit, storageKey, truncatedAt, engine }) => {
   const allRows = result.rows ?? [];
   const rowCount = allRows.length;
   const isReadOnlySelect = statement.trim().toUpperCase().startsWith('SELECT');
@@ -801,8 +845,9 @@ const ReadOnlyGrid: React.FC<{
             {editableTableName}
           </span>
         )}
-        {/* Right-aligned actions: sort indicator + filter + edit. */}
+        {/* Right-aligned actions: sort indicator + filter + export + edit. */}
         <div className="ml-auto flex items-center gap-1.5">
+          <ResultExportButton result={result} tableName={editableTableName} engine={engine} />
           {sortState && (
             <span className="inline-flex items-center gap-0.5 text-cyan-300 font-mono text-[10px]">
               {sortState.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}

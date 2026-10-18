@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { QueryTab, QueryResultSet, ErdSchemaContext, ObjectEditorContext, DatabaseConnection } from '../core/domain/types';
 import { useConnectionStore } from './useConnectionStore';
 import { useWorkspaceStore } from './useWorkspaceStore';
@@ -68,7 +69,7 @@ interface TabState {
    *  Clears any stale results since they belonged to the old connection. */
   setTabConnection: (id: string, connectionId: string) => void;
   /** Records the on-disk path a `sql_editor` tab was saved to (Save/Save As),
-   *  and renames the tab to the file's base name so the tab bar reflects it. */
+   *  renames the tab to the file's base name, and clears its unsaved mark. */
   setTabFilePath: (id: string, filePath: string, title: string) => void;
   /** Set the schema/database a SQL editor tab targets (toolbar picker).
    *  Clears stale results since the prior ones ran against a different db. */
@@ -145,7 +146,7 @@ function warnIfTransactionLeftOpen(resultSets: QueryResultSet[]) {
   });
 }
 
-export const useTabStore = create<TabState>((set, get) => ({
+export const useTabStore = create<TabState>()(persist((set, get) => ({
   tabs: [
     {
       id: 'tab_welcome',
@@ -452,7 +453,12 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   closeTab: (id) => {
     const state = get();
-    if (state.tabs.length <= 1) return;
+    if (!state.tabs.some((t) => t.id === id)) return;
+    // Closing the last tab leaves a fresh empty query, like Close All.
+    if (state.tabs.length <= 1) {
+      get().closeAllTabs();
+      return;
+    }
     const filtered = state.tabs.filter((t) => t.id !== id);
     const newActiveId = state.activeTabId === id ? filtered[filtered.length - 1].id : state.activeTabId;
     set({ tabs: filtered, activeTabId: newActiveId });
@@ -555,7 +561,7 @@ export const useTabStore = create<TabState>((set, get) => ({
 
   setTabFilePath: (id, filePath, title) => {
     set((state) => ({
-      tabs: state.tabs.map((t) => (t.id === id ? { ...t, filePath, title } : t)),
+      tabs: state.tabs.map((t) => (t.id === id ? { ...t, filePath, title, isDirty: false } : t)),
     }));
   },
 
@@ -785,5 +791,25 @@ export const useTabStore = create<TabState>((set, get) => ({
         }),
       }));
     }
+  },
+}), {
+  // SQL editor tabs (text, connection, file) survive a restart, so quitting
+  // or Cmd+W on the window never silently drops unsaved queries. Other tab
+  // kinds hold live results or context that is cheap to reopen.
+  name: 'rdsql_tabs_v1',
+  storage: createJSONStorage(() => localStorage),
+  partialize: (state) => {
+    const tabs = state.tabs
+      .filter((t) => t.tabType === 'sql_editor')
+      .map(({ id, title, sql, tabType, connectionId, schemaName, filePath, isDirty }) => ({
+        id, title, sql, tabType, connectionId, schemaName, filePath, isDirty,
+      }));
+    const activeTabId = tabs.some((t) => t.id === state.activeTabId) ? state.activeTabId : tabs[0]?.id;
+    return { tabs, activeTabId } as Partial<TabState>;
+  },
+  merge: (persisted, current) => {
+    const p = persisted as Partial<TabState> | undefined;
+    if (!p?.tabs?.length) return current;
+    return { ...current, tabs: p.tabs, activeTabId: p.activeTabId ?? p.tabs[0].id };
   },
 }));

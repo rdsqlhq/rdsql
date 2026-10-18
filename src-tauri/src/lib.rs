@@ -151,6 +151,15 @@ pub fn run() {
                 .accelerator("CmdOrCtrl+O")
                 .build(app)?;
 
+            // Cmd+W closes the active tab (asking first if it has unsaved
+            // SQL); closing the whole window moves to Shift+Cmd+W.
+            let close_tab = MenuItemBuilder::with_id("close_tab", "Close Tab")
+                .accelerator("CmdOrCtrl+W")
+                .build(app)?;
+            let close_window = MenuItemBuilder::with_id("close_window", "Close Window")
+                .accelerator("CmdOrCtrl+Shift+W")
+                .build(app)?;
+
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&new_conn)
                 .item(&open_sql)
@@ -159,7 +168,8 @@ pub fn run() {
                 .item(&export_menu)
                 .item(&import_menu)
                 .separator()
-                .item(&PredefinedMenuItem::close_window(app, None)?)
+                .item(&close_tab)
+                .item(&close_window)
                 .build()?;
 
             // Build Edit Submenu
@@ -289,6 +299,14 @@ pub fn run() {
                 }
                 "open_sql_file" => {
                     let _ = app.emit("menu_action", "open_sql_file");
+                }
+                "close_tab" => {
+                    let _ = app.emit("menu_action", "close_tab");
+                }
+                "close_window" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.close();
+                    }
                 }
                 "export_csv" => {
                     let _ = app.emit("menu_action", "export_csv");

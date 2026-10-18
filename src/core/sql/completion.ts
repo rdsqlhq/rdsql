@@ -196,3 +196,37 @@ export function tablesInScope(textUntilCursor: string): string[] {
   }
   return Array.from(names);
 }
+
+/** The statement the cursor is in: text between the nearest `;` before the
+ *  cursor and the next one after it. */
+export function statementAround(fullText: string, offset: number): string {
+  const start = fullText.lastIndexOf(';', offset - 1) + 1;
+  const endIdx = fullText.indexOf(';', offset);
+  return fullText.slice(start, endIdx === -1 ? fullText.length : endIdx);
+}
+
+const NOT_ALIAS = new Set([
+  'WHERE', 'ON', 'USING', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'CROSS', 'NATURAL',
+  'GROUP', 'ORDER', 'LIMIT', 'OFFSET', 'HAVING', 'UNION', 'EXCEPT', 'INTERSECT', 'SET', 'VALUES',
+  'WINDOW', 'FETCH', 'FOR', 'RETURNING', 'AS', 'SELECT', 'FROM', 'AND', 'OR',
+]);
+
+/** Table aliases declared in FROM/JOIN/UPDATE clauses (`FROM users u`,
+ *  `JOIN public.orders AS o`), keyed by lowercased alias. */
+export function tableAliases(statement: string): Map<string, { schema?: string; table: string }> {
+  const aliases = new Map<string, { schema?: string; table: string }>();
+  const re = new RegExp(
+    `(?:FROM|JOIN|UPDATE)\\s+(${IDENT})(?:\\s*\\.\\s*(${IDENT}))?(?:\\s+(?:AS\\s+)?(${IDENT}))?`,
+    'gi'
+  );
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(statement)) !== null) {
+    const [, first, second, alias] = m;
+    if (!alias || NOT_ALIAS.has(alias.toUpperCase())) continue;
+    const ref = second
+      ? { schema: unquoteIdent(first), table: unquoteIdent(second) }
+      : { table: unquoteIdent(first) };
+    aliases.set(unquoteIdent(alias).toLowerCase(), ref);
+  }
+  return aliases;
+}
