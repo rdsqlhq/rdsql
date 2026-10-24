@@ -86,6 +86,16 @@ export function categorizeStatement(stmt: string, capabilities?: BackupEngineCap
   if (stripped.match(/^\s*CREATE\s+(TABLE|INDEX|UNIQUE\s+INDEX|VIEW|MATERIALIZED\s+VIEW|TRIGGER|SCHEMA|DATABASE|TYPE|FUNCTION|PROCEDURE|EXTENSION|SEQUENCE)/)) return 'ddl_create';
   if (stripped.match(/^\s*CREATE\s+UNIQUE\s+INDEX/)) return 'ddl_create';
 
+  // Postgres DO blocks: rdSQL backups use them to create enum types only when
+  // missing, and those must exist before the tables that use them.
+  if (stripped.match(/^\s*DO\s+(\$|LANGUAGE)/)) return 'ddl_create';
+
+  // SQL Server's guarded create (it has no CREATE TABLE IF NOT EXISTS).
+  if (stripped.match(/^\s*IF\s+OBJECT_ID\s*\(.*\)\s+IS\s+NULL\s+CREATE\s+TABLE/s)) return 'ddl_create';
+  // IDENTITY_INSERT is switched on/off around one table's INSERTs, so it
+  // must stay exactly where it is among them, not move up with the settings.
+  if (stripped.match(/^\s*SET\s+IDENTITY_INSERT\b/)) return 'dml';
+
   // DDL: ALTER
   if (stripped.match(/^\s*ALTER\s+TABLE/)) return 'ddl_alter';
 

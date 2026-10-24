@@ -32,7 +32,7 @@ pub async fn preview_repair(
     let affected = request.affected_objects.clone();
 
     match (engine.as_str(), action) {
-        ("postgres" | "postgresql" | "cockroachdb" | "yugabytedb", "postgres.seq_sync") => {
+        ("postgres" | "postgresql" | "neon" | "cockroachdb" | "yugabytedb", "postgres.seq_sync") => {
             let seq = request.details.get("sequence").cloned().unwrap_or_default();
             let col = request.details.get("column").cloned().unwrap_or_default();
             if seq.is_empty() || col.is_empty() {
@@ -54,7 +54,7 @@ pub async fn preview_repair(
                 verification_sql: Some(format!("SELECT last_value FROM {}", seq)),
             })
         }
-        ("postgres" | "postgresql" | "cockroachdb" | "yugabytedb", "postgres.analyze_table") => {
+        ("postgres" | "postgresql" | "neon" | "cockroachdb" | "yugabytedb", "postgres.analyze_table") => {
             let sql: Vec<String> = affected.iter().map(|t| format!("ANALYZE {};", t)).collect();
             Ok(RepairPlan {
                 diagnostic_id: request.diagnostic_id,
@@ -67,7 +67,7 @@ pub async fn preview_repair(
                 verification_sql: None,
             })
         }
-        ("postgres" | "postgresql" | "cockroachdb" | "yugabytedb", "postgres.vacuum_table") => {
+        ("postgres" | "postgresql" | "neon" | "cockroachdb" | "yugabytedb", "postgres.vacuum_table") => {
             let sql: Vec<String> = affected.iter().map(|t| format!("VACUUM (ANALYZE) {};", t)).collect();
             Ok(RepairPlan {
                 diagnostic_id: request.diagnostic_id,
@@ -80,7 +80,7 @@ pub async fn preview_repair(
                 verification_sql: None,
             })
         }
-        ("postgres" | "postgresql" | "cockroachdb" | "yugabytedb", "postgres.reindex") => {
+        ("postgres" | "postgresql" | "neon" | "cockroachdb" | "yugabytedb", "postgres.reindex") => {
             // REINDEX is non-destructive (rebuilds a broken/invalid index in place).
             let sql: Vec<String> = affected.iter().map(|i| format!("REINDEX INDEX {};", i)).collect();
             Ok(RepairPlan {
@@ -94,7 +94,7 @@ pub async fn preview_repair(
                 verification_sql: None,
             })
         }
-        ("postgres" | "postgresql" | "cockroachdb" | "yugabytedb", "postgres.drop_index") => {
+        ("postgres" | "postgresql" | "neon" | "cockroachdb" | "yugabytedb", "postgres.drop_index") => {
             // Destructive — requires backup recommendation and stronger confirmation.
             let sql: Vec<String> = affected.iter().map(|i| format!("DROP INDEX {};", i)).collect();
             Ok(RepairPlan {

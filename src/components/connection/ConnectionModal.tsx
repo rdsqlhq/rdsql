@@ -638,6 +638,8 @@ export const ConnectionModal: React.FC = () => {
                           setEngine(next);
                           const dp = engineMeta(next).defaultPort;
                           if (dp !== undefined) setPort(dp);
+                          // Neon only accepts TLS connections.
+                          if (next === 'neon' && !sslMode) setSslMode('require');
                           // 'security' only exists for networked engines — bounce to connection.
                           if (getEngineFamily(next) === 'sqlite' && section === 'security') setSection('connection');
                           setTestResult(null);

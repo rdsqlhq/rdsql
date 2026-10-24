@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, RefreshCw, Download, CheckCircle2, AlertTriangle, ExternalLink, Database, Bug } from 'lucide-react';
+import { X, RefreshCw, Download, CheckCircle2, AlertTriangle, ExternalLink, Database, Bug, Star, Heart } from 'lucide-react';
 import { EditionBadge } from './EditionBadge';
 import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
@@ -144,8 +144,36 @@ export const AboutModal: React.FC = () => {
 
           <p className="text-xs text-slate-400 leading-relaxed">
             Modern Database Workspace — a native desktop application for browsing, querying,
-            comparing, and syncing databases.
+            and comparing databases.
           </p>
+
+          {/* Support the project */}
+          <div className="rounded-xl border border-[#1e293b] bg-[#06090e]/50 p-3 space-y-2">
+            <p className="text-xs text-slate-400 leading-relaxed">
+              rdSQL is free and open source. If it helps you, please give it a star on GitHub. It
+              helps other people find the project.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="https://github.com/rdsqlhq/rdsql"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 text-amber-300 text-xs font-semibold transition-colors"
+              >
+                <Star className="w-3.5 h-3.5" />
+                Star on GitHub
+              </a>
+              <a
+                href="https://github.com/sponsors/rdsqlhq"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-pink-500/10 border border-pink-500/30 hover:bg-pink-500/20 text-pink-300 text-xs font-semibold transition-colors"
+              >
+                <Heart className="w-3.5 h-3.5" />
+                Sponsor
+              </a>
+            </div>
+          </div>
 
           {/* Links */}
           <div className="flex flex-wrap items-center gap-2">

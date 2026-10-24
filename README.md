@@ -11,6 +11,8 @@
 
 **A modern AI-powered database workspace designed for developers.**
 
+⭐ **If rdSQL is useful to you, please [star it on GitHub](https://github.com/rdsqlhq/rdsql). It helps other people find it.** · 💖 [Sponsor rdSQL](https://github.com/sponsors/rdsqlhq)
+
 [Website](https://rdsql.com) · [Documentation](https://rdsql.com/docs) · [Tutorials](docs/tutorials) · [Releases](https://github.com/rdsqlhq/rdsql/releases) · [Bug Reports](https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml) · [Feature Requests](https://github.com/rdsqlhq/rdsql/issues/new?template=feature_request.yml) · [Discussions](https://github.com/rdsqlhq/rdsql/discussions)
 
 </div>
@@ -27,10 +29,9 @@ It provides a flagship developer experience for:
 - 🍃 **MongoDB Explorer** (document browser, aggregation pipeline builder, index management)
 - 📊 **Visual ERD Studio** (Interactive schema canvas powered by `@xyflow/react`)
 - 🔀 **Migration Studio** (Environment schema diffing & versioning)
-- 💾 **Native Backup & Restore** (High-performance compressed SQL dumps using Rust workers)
+- 💾 **Backup, Restore & Copy** (SQL dumps to a file or S3, or straight into another connection — verified row-for-row on every engine by the e2e suite in [`e2e/backup`](e2e/backup))
 - ☁️ **S3-Compatible Object Storage Browser** (AWS S3, Cloudflare R2, MinIO)
 - 🤖 **AI Assistant** (SQL generation, query optimization, and schema explanation)
-- 🔄 **Encrypted Cross-Device Sync** (connections, credentials, and app/AI settings — end-to-end encrypted)
 
 ---
 
@@ -39,6 +40,7 @@ It provides a flagship developer experience for:
 | Engine | | Engine | |
 |---|---|---|---|
 | PostgreSQL | ✅ | MariaDB | ✅ |
+| Neon | ✅ | | |
 | MySQL | ✅ | TiDB | ✅ |
 | SQLite | ✅ | PlanetScale | ✅ |
 | DuckDB | ✅ | CockroachDB | ✅ |
@@ -77,7 +79,7 @@ More screenshots land in [`screenshots/`](screenshots/) as new views ship.
 - **Data Grid**: Custom virtualized grid (windowed row rendering, inline editing, resizable + auto-fit columns)
 - **Diagramming Canvas**: React Flow (`@xyflow/react`)
 - **State Management**: Zustand
-- **Native Security**: OS Keyring (session tokens, sync key material) + AES-256-GCM (S3 secrets, cloud sync credentials). Database connection passwords in local storage are not yet keyring-backed — that migration is tracked separately.
+- **Native Security**: OS Keyring (session tokens) + AES-256-GCM (S3 secrets). Database connection passwords in local storage are not yet keyring-backed — that migration is tracked separately.
 
 ---
 

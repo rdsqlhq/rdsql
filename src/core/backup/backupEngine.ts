@@ -1,5 +1,5 @@
 import type { DatabaseEngine, SchemaTableNode, QueryColumn } from '../domain/types';
-import { generateCreateTableSql, generateInsertStatements } from './backupSql';
+import { generateCreateTableSql, generateInsertStatements, createPgEnumSql, isPgSequenceColumn, pgSequenceResetSql } from './backupSql';
 import { qualifiedTable } from '../sql/ident';
 import { sortTablesByDependency } from './dependencyGraph';
 import { isMysqlFamily, isDuckdbFamily } from '../connection/engines';
@@ -58,6 +58,7 @@ export function getEngineCapabilities(engine: DatabaseEngine): BackupEngineCapab
         supportsDeferredConstraints: false,
       };
     case 'postgres':
+    case 'neon':
     case 'cockroachdb':
     case 'yugabytedb':
       return {
@@ -192,8 +193,11 @@ export function buildBackupPlan(params: {
    *  connection config already targets the right database).
    *  When undefined (omitted), falls back to the source schema. */
   targetSchema?: string | null;
+  /** Postgres enum types in the source schema (see `pgEnumTypesSql`). The
+   *  ones the selected tables use are created before the tables. */
+  pgEnums?: { name: string; labels: string[] }[];
 }): BackupExecutionPlan {
-  const { engine, tables, selections, schema, writeMode, targetSchema } = params;
+  const { engine, tables, selections, schema, writeMode, targetSchema, pgEnums = [] } = params;
   const capabilities = getEngineCapabilities(engine);
 
   // Sort tables by FK dependency (parents first). Falls back to original order
@@ -237,15 +241,24 @@ export function buildBackupPlan(params: {
     }
   }
 
+  // Enum types the selected tables' columns use, before the tables.
+  const structureTables = orderedTables.filter((t) => selections.get(t.name)?.structure);
+  const usedTypes = new Set(
+    structureTables.flatMap((t) => t.children.map((c) => (c.data_type || '').replace(/(\[\])+$/, '')))
+  );
+  const enums = pgEnums.filter((e) => usedTypes.has(e.name));
+  for (const e of enums) {
+    items.push({ id: `type_${e.name}`, table: '', phase: 'schema', sql: createPgEnumSql(engine, e.name, e.labels, applySchema) });
+  }
+  const userTypes = new Set(enums.map((e) => e.name));
+
   // CREATE TABLE statements in dependency order (parents first)
-  for (const table of orderedTables) {
-    const sel = selections.get(table.name);
-    if (!sel || !sel.structure) continue;
+  for (const table of structureTables) {
     items.push({
       id: `create_${table.name}`,
       table: table.name,
       phase: 'schema',
-      sql: generateCreateTableSql(engine, table, applySchema),
+      sql: generateCreateTableSql(engine, table, applySchema, userTypes),
     });
   }
 
@@ -291,7 +304,20 @@ export function buildBackupPlan(params: {
   // Currently no generators produce these — the phase exists so adding them
   // later is additive (insert items here), not structural.
 
-  // ── Phase 4: Finalize (FK re-enable) ──────────────────────────────────
+  // ── Phase 4: Finalize (sequence reset, FK re-enable) ──────────────────
+  // Restored rows carry their own ids; move each serial/identity sequence
+  // past them so the application's next insert doesn't reuse one.
+  for (const table of orderedTables) {
+    if (!selections.get(table.name)?.data) continue;
+    for (const col of table.children.filter((c) => isPgSequenceColumn(engine, c))) {
+      items.push({
+        id: `seq_${table.name}_${col.name}`,
+        table: table.name,
+        phase: 'finalize',
+        sql: pgSequenceResetSql(engine, table.name, col.name, applySchema),
+      });
+    }
+  }
   if (capabilities.canDisableFkChecks && capabilities.fkEnableSql) {
     items.push({
       id: 'finalize_fk_enable',
@@ -327,7 +353,8 @@ export function generateDataStatements(
   tableName: string,
   targetSchema: string | undefined,
   columns: QueryColumn[],
-  rows: unknown[][]
+  rows: unknown[][],
+  hexColumns?: Set<string>
 ): string[] {
-  return generateInsertStatements(engine, tableName, targetSchema, columns, rows);
+  return generateInsertStatements(engine, tableName, targetSchema, columns, rows, undefined, hexColumns);
 }

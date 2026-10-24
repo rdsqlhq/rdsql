@@ -90,15 +90,12 @@ pub fn duckdb_value_to_json(val: duckdb::types::Value) -> serde_json::Value {
         Value::TinyInt(n) => serde_json::json!(n as i64),
         Value::SmallInt(n) => serde_json::json!(n as i64),
         Value::Int(n) => serde_json::json!(n),
-        Value::BigInt(n) => serde_json::json!(n),
+        Value::BigInt(n) => super::query::int_json(n as i128),
         Value::UTinyInt(n) => serde_json::json!(n as u64),
         Value::USmallInt(n) => serde_json::json!(n as u64),
         Value::UInt(n) => serde_json::json!(n as u64),
-        Value::UBigInt(n) => serde_json::json!(n),
-        Value::HugeInt(n) => {
-            // i128 may overflow JSON's safe integer range — emit as string.
-            serde_json::json!(n.to_string())
-        }
+        Value::UBigInt(n) => super::query::int_json(n as i128),
+        Value::HugeInt(n) => super::query::int_json(n),
         Value::UHugeInt(n) => serde_json::json!(n.to_string()),
         Value::Float(f) => serde_json::json!(f),
         Value::Double(f) => serde_json::json!(f),
@@ -396,6 +393,7 @@ pub fn fetch_duckdb_schema(config: &ConnectionConfig) -> Result<Vec<SchemaNode>,
                         is_foreign_key: None,
                         is_nullable: Some(c.is_nullable),
                         has_default: Some(c.has_default),
+                        column_default: None,
                         children: vec![],
                     }
                 })
@@ -411,6 +409,7 @@ pub fn fetch_duckdb_schema(config: &ConnectionConfig) -> Result<Vec<SchemaNode>,
                 is_foreign_key: None,
                 is_nullable: None,
                 has_default: None,
+                column_default: None,
                 children,
             });
         }
@@ -425,6 +424,7 @@ pub fn fetch_duckdb_schema(config: &ConnectionConfig) -> Result<Vec<SchemaNode>,
             is_foreign_key: None,
             is_nullable: None,
             has_default: None,
+            column_default: None,
             children: table_nodes,
         });
     }

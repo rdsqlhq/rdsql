@@ -6,6 +6,7 @@ import { safeInvoke } from '../../core/tauri/ipc';
 import { useConnectionStore } from '../../store/useConnectionStore';
 import { cn } from '../../core/utils/cn';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
+import { isPostgresServer } from '../../core/connection/engines';
 
 /** Active-query monitor (spec §15). Cancel/terminate are gated by a
  *  confirmation popover; the actions are delegated to the existing
@@ -126,7 +127,7 @@ const ConfirmCancel: React.FC<{ row: ActivityRow; onClose: () => void; onDone: (
       // query" — KILL ends the whole session).
       const engine = conn.engine;
       let sql = '';
-      if (engine === 'postgres') sql = `SELECT pg_cancel_backend(${row.pid});`;
+      if (isPostgresServer(engine)) sql = `SELECT pg_cancel_backend(${row.pid});`;
       else if (engine === 'mysql') sql = `KILL QUERY ${row.pid};`;
       else if (engine === 'mssql') sql = `KILL ${row.pid};`;
       else throw new Error(`Cancellation not supported for engine: ${engine}`);

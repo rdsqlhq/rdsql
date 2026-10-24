@@ -115,6 +115,13 @@ pub struct SchemaNode {
     /// column, etc. — the database fills it in even if it's NOT NULL, so a
     /// UI shouldn't treat it as "required to type something in".
     pub has_default: Option<bool>,
+    /// How the column is filled in, for backup's CREATE TABLE. Postgres: the
+    /// DEFAULT expression (e.g. `now()` or `nextval('"User_id_seq"'::regclass)`).
+    /// MySQL family: the whole clause, e.g. `AUTO_INCREMENT` or `DEFAULT 'ID'`
+    /// (see `mysql_default_clause`). SQL Server: likewise, e.g.
+    /// `IDENTITY(1,1)` or `DEFAULT ('ID')`. Never sent when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_default: Option<String>,
     pub children: Vec<SchemaNode>,
 }
 
@@ -480,6 +487,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                                 is_foreign_key: Some(false),
                                 is_nullable: Some(notnull == 0),
                                 has_default: Some(dflt_value.is_some() || is_rowid_alias),
+                                column_default: None,
                                 children: vec![],
                             })
                         })
@@ -502,6 +510,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                         is_foreign_key: None,
                         is_nullable: None,
                         has_default: None,
+                        column_default: None,
                         children: cols,
                     });
                 }
@@ -517,6 +526,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                 is_foreign_key: None,
                 is_nullable: None,
                 has_default: None,
+                column_default: None,
                 children: table_nodes,
             }])
         }
@@ -559,21 +569,28 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
             // System schemas (pg_catalog, information_schema) are excluded by
             // default — same convention as every other DB GUI (DBeaver,
             // pgAdmin, TablePlus). `include_system_schemas` opts back in.
-            // (`pg_toast` still won't appear even then: Postgres itself never
+            // CockroachDB's `crdb_internal`/`pg_extension` are system schemas
+            // too. (`pg_toast` still won't appear even then: Postgres itself never
             // grants regular users USAGE on that schema, so information_schema
             // hides it regardless of our own filter — a server-side
             // restriction this app can't override.)
             let schema_filter = if config.include_system_schemas.unwrap_or(false) {
                 ""
             } else {
-                "WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')"
+                "WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema', 'crdb_internal', 'pg_extension')"
+            };
+            // CockroachDB has no pg_total_relation_size().
+            let size_expr = if engine == "cockroachdb" {
+                "0::bigint"
+            } else {
+                "COALESCE(pg_total_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)), 0)::bigint"
             };
             let query = format!("
                 SELECT
                     t.table_schema,
                     t.table_name,
                     t.table_type,
-                    COALESCE(pg_total_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)), 0)::bigint AS size_bytes,
+                    {size_expr} AS size_bytes,
                     GREATEST(0, COALESCE(c_est.reltuples::bigint, 0)) AS row_count,
                     col.column_name,
                     -- information_schema.columns.data_type is USELESS for
@@ -615,16 +632,21 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     SELECT ku.table_schema, ku.table_name, ku.column_name
                     FROM information_schema.table_constraints tc
                     JOIN information_schema.key_column_usage ku
-                      ON tc.constraint_name = ku.constraint_name AND ku.table_schema = ku.table_schema
+                      ON tc.constraint_name = ku.constraint_name AND tc.table_schema = ku.table_schema AND tc.table_name = ku.table_name
                     WHERE tc.constraint_type = 'PRIMARY KEY'
                 ) pk ON pk.table_schema = col.table_schema
                      AND pk.table_name = col.table_name
                      AND pk.column_name = col.column_name
-                {}
+                {schema_filter}
                 ORDER BY t.table_schema, t.table_name, col.ordinal_position;
-            ", schema_filter);
+            ", size_expr = size_expr, schema_filter = schema_filter);
 
-            let rows = client.query(&query, &[]).await.map_err(|e| e.to_string())?;
+            // `Error`'s Display is just "db error"; the server's message is
+            // what tells the user what went wrong.
+            let rows = client
+                .query(&query, &[])
+                .await
+                .map_err(|e| e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string()))?;
 
             // Collect unique (schema, table) pairs where the reltuples estimate
             // is 0, so we can run an accurate COUNT(*) for just those tables.
@@ -660,7 +682,8 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     .enumerate()
                     .map(|(idx, (schema, table))| {
                         format!(
-                            "SELECT {}::int AS idx, COUNT(*) AS cnt FROM {}.{}",
+                            // int4, not int: CockroachDB's INT is 8 bytes.
+                            "SELECT {}::int4 AS idx, COUNT(*) AS cnt FROM {}.{}",
                             idx,
                             quote_pg_ident(schema),
                             quote_pg_ident(table)
@@ -670,8 +693,11 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     .join(" UNION ALL ");
                 if let Ok(count_rows) = client.query(count_sql.as_str(), &[]).await {
                     for count_row in &count_rows {
-                        let idx: i32 = count_row.get(0);
-                        let cnt: i64 = count_row.get(1);
+                        // try_get: a type mismatch must not panic the command
+                        // (the UI would wait on it forever).
+                        let (Ok(idx), Ok(cnt)) = (count_row.try_get::<_, i32>(0), count_row.try_get::<_, i64>(1)) else {
+                            continue;
+                        };
                         if let Some((schema, table)) = tables_needing_real_count.get(idx as usize) {
                             real_counts.insert((schema.clone(), table.clone()), cnt);
                         }
@@ -726,6 +752,13 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     is_foreign_key: Some(false),
                     is_nullable: Some(is_nullable_txt.eq_ignore_ascii_case("YES")),
                     has_default: Some(column_default.is_some() || is_identity_txt.eq_ignore_ascii_case("YES")),
+                    // Identity columns have no column_default; report them in
+                    // the same field so backup can recreate them.
+                    column_default: if is_identity_txt.eq_ignore_ascii_case("YES") {
+                        Some("GENERATED BY DEFAULT AS IDENTITY".to_string())
+                    } else {
+                        column_default
+                    },
                     children: vec![],
                 });
             }
@@ -744,6 +777,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                         is_foreign_key: None,
                         is_nullable: None,
                         has_default: None,
+                        column_default: None,
                         children: meta.cols,
                     });
                 }
@@ -757,6 +791,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     is_foreign_key: None,
                     is_nullable: None,
                     has_default: None,
+                    column_default: None,
                     children: table_nodes,
                 });
             }
@@ -807,6 +842,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                 is_nullable_txt: String,
                 column_default: Option<String>,
                 extra: String,
+                is_mariadb: bool,
             ) {
                 let entry = tables.entry(table_name).or_insert_with(|| TableMeta {
                     tbl_type: if table_type == "VIEW" { "view".to_string() } else { "table".to_string() },
@@ -827,9 +863,20 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     is_foreign_key: Some(column_key == "MUL"),
                     is_nullable: Some(is_nullable_txt.eq_ignore_ascii_case("YES")),
                     has_default: Some(column_default.is_some() || extra_lower.contains("auto_increment")),
+                    column_default: mysql_default_clause(column_default.as_deref(), &extra, is_mariadb),
                     children: vec![],
                 });
             }
+
+            // MySQL reports a literal default unquoted (`ID`) and an expression
+            // with `DEFAULT_GENERATED` in EXTRA; MariaDB reports SQL as written
+            // (`'ID'`, `current_timestamp()`, `NULL` for none). Checked once.
+            let is_mariadb = conn
+                .query_first::<String, _>("SELECT VERSION()")
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|v| v.to_lowercase().contains("mariadb"));
 
             use std::collections::BTreeMap;
             let mut schemas: BTreeMap<String, BTreeMap<String, TableMeta>> = BTreeMap::new();
@@ -919,7 +966,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                 let tables = schemas.entry(schema_name).or_default();
                 push_mysql_column(
                     tables, table_name, table_type, row_count, size_bytes, col_name, data_type, column_key,
-                    is_nullable_txt, column_default, extra,
+                    is_nullable_txt, column_default, extra, is_mariadb,
                 );
             }
 
@@ -941,6 +988,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                         is_foreign_key: None,
                         is_nullable: None,
                         has_default: None,
+                        column_default: None,
                         children: meta.cols,
                     })
                     .collect();
@@ -955,6 +1003,7 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
                     is_foreign_key: None,
                     is_nullable: None,
                     has_default: None,
+                    column_default: None,
                     children: table_nodes,
                 });
             }
@@ -968,7 +1017,72 @@ pub async fn fetch_schema_tree_impl(config: ConnectionConfig) -> Result<Vec<Sche
     }
 }
 
+/// The DEFAULT / AUTO_INCREMENT / ON UPDATE part of a MySQL-family column
+/// definition, rebuilt from information_schema.COLUMNS, for backup's CREATE
+/// TABLE. None when the column has none of them.
+pub(crate) fn mysql_default_clause(column_default: Option<&str>, extra: &str, is_mariadb: bool) -> Option<String> {
+    let extra_lower = extra.to_lowercase();
+    let mut parts: Vec<String> = Vec::new();
+    if extra_lower.contains("auto_increment") {
+        parts.push("AUTO_INCREMENT".to_string());
+    }
+    match column_default {
+        None => {}
+        Some("NULL") if is_mariadb => {}
+        Some(v) if is_mariadb => parts.push(format!("DEFAULT {}", v)),
+        Some(v) if extra_lower.contains("default_generated") => {
+            // CURRENT_TIMESTAMP is allowed bare; any other expression needs
+            // parentheses (MySQL 8.0.13+).
+            if v.to_lowercase().starts_with("current_timestamp") {
+                parts.push(format!("DEFAULT {}", v));
+            } else {
+                parts.push(format!("DEFAULT ({})", v));
+            }
+        }
+        // BIT defaults come back as a bit literal already.
+        Some(v) if v.starts_with("b'") && v.ends_with('\'') => parts.push(format!("DEFAULT {}", v)),
+        Some(v) => parts.push(format!("DEFAULT '{}'", v.replace('\\', "\\\\").replace('\'', "''"))),
+    }
+    if let Some(idx) = extra_lower.find("on update ") {
+        parts.push(format!("ON UPDATE {}", &extra[idx + "on update ".len()..]));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 #[tauri::command]
 pub async fn fetch_schema_tree(config: ConnectionConfig) -> Result<Vec<SchemaNode>, String> {
     fetch_schema_tree_impl(config).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mysql_default_clause;
+
+    #[test]
+    fn mysql_default_clause_mysql() {
+        assert_eq!(mysql_default_clause(None, "auto_increment", false).as_deref(), Some("AUTO_INCREMENT"));
+        assert_eq!(mysql_default_clause(Some("ID"), "", false).as_deref(), Some("DEFAULT 'ID'"));
+        assert_eq!(mysql_default_clause(Some("it's \\"), "", false).as_deref(), Some("DEFAULT 'it''s \\\\'"));
+        assert_eq!(
+            mysql_default_clause(Some("CURRENT_TIMESTAMP(6)"), "DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)", false).as_deref(),
+            Some("DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)")
+        );
+        assert_eq!(mysql_default_clause(Some("uuid()"), "DEFAULT_GENERATED", false).as_deref(), Some("DEFAULT (uuid())"));
+        assert_eq!(mysql_default_clause(Some("b'101'"), "", false).as_deref(), Some("DEFAULT b'101'"));
+        assert_eq!(mysql_default_clause(None, "", false), None);
+    }
+
+    #[test]
+    fn mysql_default_clause_mariadb() {
+        assert_eq!(mysql_default_clause(Some("NULL"), "", true), None);
+        assert_eq!(mysql_default_clause(Some("'ID'"), "", true).as_deref(), Some("DEFAULT 'ID'"));
+        assert_eq!(
+            mysql_default_clause(Some("current_timestamp()"), "on update current_timestamp()", true).as_deref(),
+            Some("DEFAULT current_timestamp() ON UPDATE current_timestamp()")
+        );
+    }
 }

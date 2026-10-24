@@ -205,7 +205,7 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
         }
         PgType::INT8 => {
             let v: Option<i64> = row.try_get(idx).ok().flatten();
-            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+            v.map(|n| int_json(n as i128)).unwrap_or(serde_json::Value::Null)
         }
         // Floating point.
         PgType::FLOAT4 => {
@@ -266,13 +266,28 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
         // only with the `with-serde_json-1` feature. Without it, we get the raw
         // text (JSONB is sent as text wire format anyway). Parse it into JSON so
         // the frontend receives a structured value, not a string.
+        // `String`'s `accepts()` rejects both OIDs (the old `Option<String>`
+        // here returned null for every json/jsonb cell), so read the raw
+        // bytes: json's binary form is the text itself, jsonb's is a 0x01
+        // version byte followed by the text.
         PgType::JSON | PgType::JSONB => {
-            let v: Option<String> = row.try_get(idx).ok().flatten();
+            let v: Option<RawText> = row.try_get(idx).ok().flatten();
             match v {
-                Some(s) => serde_json::from_str::<serde_json::Value>(&s)
-                    .unwrap_or_else(|_| json!(s)),
+                Some(RawText(s)) => {
+                    let s = if *ty == PgType::JSONB { s.strip_prefix('\u{1}').unwrap_or(&s).to_string() } else { s };
+                    serde_json::from_str::<serde_json::Value>(&s).unwrap_or_else(|_| json!(s))
+                }
                 None => serde_json::Value::Null,
             }
+        }
+        PgType::OID => {
+            let v: Option<u32> = row.try_get(idx).ok().flatten();
+            v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null)
+        }
+        // xml's binary form is its text.
+        PgType::XML => {
+            let v: Option<RawText> = row.try_get(idx).ok().flatten();
+            v.map(|t| json!(t.0)).unwrap_or(serde_json::Value::Null)
         }
         // Bytea — describe rather than dump raw bytes.
         PgType::BYTEA => {
@@ -315,7 +330,7 @@ fn pg_array_to_json(row: &tokio_postgres::Row, idx: usize, elem_ty: &PgType) -> 
     match *elem_ty {
         PgType::INT2 => to_json(row.try_get::<_, Option<Vec<Option<i16>>>>(idx).ok().flatten(), |n| json!(n)),
         PgType::INT4 => to_json(row.try_get::<_, Option<Vec<Option<i32>>>>(idx).ok().flatten(), |n| json!(n)),
-        PgType::INT8 => to_json(row.try_get::<_, Option<Vec<Option<i64>>>>(idx).ok().flatten(), |n| json!(n)),
+        PgType::INT8 => to_json(row.try_get::<_, Option<Vec<Option<i64>>>>(idx).ok().flatten(), |n| int_json(n as i128)),
         PgType::FLOAT4 => to_json(row.try_get::<_, Option<Vec<Option<f32>>>>(idx).ok().flatten(), |n| json!(n)),
         PgType::FLOAT8 => to_json(row.try_get::<_, Option<Vec<Option<f64>>>>(idx).ok().flatten(), |n| json!(n)),
         PgType::BOOL => to_json(row.try_get::<_, Option<Vec<Option<bool>>>>(idx).ok().flatten(), |b| json!(b)),
@@ -501,6 +516,13 @@ impl Session {
             }
             Session::Mssql(client) => Ok(truncate(super::mssql::run_mssql_on(client, sql).await?, limit)),
             Session::Sqlite { conn, path } => {
+                // `prepare` compiles only the first statement and silently
+                // ignores the rest, so a script of several (backup's batched
+                // INSERTs) lost every row after its first statement. Run a
+                // multi-statement script one statement at a time instead.
+                if let Some(affected) = run_sqlite_script(conn, sql)? {
+                    return Ok((affected_result(affected, start), false));
+                }
                 let mut stmt = conn.prepare(sql).map_err(|e| from_sqlite(e, Some(sql)).to_json_string())?;
                 // A statement that yields columns returns rows (SELECT, PRAGMA,
                 // EXPLAIN, WITH ... SELECT, INSERT ... RETURNING).
@@ -537,7 +559,7 @@ impl Session {
                         let val: rusqlite::types::Value = row.get(i).unwrap_or(rusqlite::types::Value::Null);
                         let json_val = match val {
                             rusqlite::types::Value::Null => serde_json::Value::Null,
-                            rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                            rusqlite::types::Value::Integer(n) => int_json(n as i128),
                             rusqlite::types::Value::Real(f) => serde_json::json!(f),
                             rusqlite::types::Value::Text(s) => serde_json::json!(s),
                             rusqlite::types::Value::Blob(b) => serde_json::json!(format!("<blob {} bytes>", b.len())),
@@ -561,8 +583,26 @@ impl Session {
                 // tells row-returning statements (SELECT, WITH, VALUES,
                 // ... RETURNING) apart from the rest without guessing from the
                 // leading keyword.
-                let stmt = client.prepare(sql).await
-                    .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                let stmt = match client.prepare(sql).await {
+                    Ok(stmt) => stmt,
+                    // A prepared statement holds exactly one command. Several
+                    // in one call (backup's batched INSERTs, a pasted script)
+                    // go through the simple protocol instead, which runs them
+                    // in order and reports each one's row count.
+                    Err(e) if is_multiple_commands_error(&e) => {
+                        let messages = client.simple_query(sql).await
+                            .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+                        let affected = messages
+                            .iter()
+                            .map(|m| match m {
+                                tokio_postgres::SimpleQueryMessage::CommandComplete(n) => *n,
+                                _ => 0,
+                            })
+                            .sum();
+                        return Ok((affected_result(affected, start), false));
+                    }
+                    Err(e) => return Err(from_postgres(e, Some(sql)).to_json_string()),
+                };
                 if stmt.columns().is_empty() {
                     let count = client.execute(&stmt, &[]).await
                         .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
@@ -691,6 +731,58 @@ impl Session {
             let _ = pool.disconnect().await;
         }
     }
+}
+
+/// JSON for a 64-bit (or wider) integer cell. The frontend parses results
+/// with `JSON.parse`, which rounds integers beyond ±2^53 (9007199254740993
+/// arrives as ...992) — and a backup then writes the rounded value. Those are
+/// sent as strings instead; every engine accepts a quoted integer back.
+pub(crate) fn int_json(n: i128) -> serde_json::Value {
+    const SAFE: i128 = (1 << 53) - 1;
+    if (-SAFE..=SAFE).contains(&n) {
+        serde_json::json!(n as i64)
+    } else {
+        serde_json::json!(n.to_string())
+    }
+}
+
+/// Runs `sql` statement by statement when it holds more than one, returning
+/// the total rows changed; None for a single statement, which the caller
+/// runs itself so its rows come back. Row-returning statements in the
+/// middle of a script are run and their rows discarded.
+fn run_sqlite_script(conn: &Connection, sql: &str) -> Result<Option<u64>, String> {
+    let err = |e| from_sqlite(e, Some(sql)).to_json_string();
+    let mut count = 0;
+    let mut probe = rusqlite::Batch::new(conn, sql);
+    while probe.next().map_err(err)?.is_some() {
+        count += 1;
+        if count > 1 {
+            break;
+        }
+    }
+    if count < 2 {
+        return Ok(None);
+    }
+    let mut affected = 0u64;
+    let mut batch = rusqlite::Batch::new(conn, sql);
+    while let Some(mut stmt) = batch.next().map_err(err)? {
+        if stmt.column_count() == 0 {
+            affected += stmt.execute([]).map_err(err)? as u64;
+        } else {
+            let mut rows = stmt.query([]).map_err(err)?;
+            while rows.next().map_err(err)?.is_some() {}
+        }
+    }
+    Ok(Some(affected))
+}
+
+/// The reply when `prepare` is given more than one statement: Postgres'
+/// wording, then CockroachDB's.
+fn is_multiple_commands_error(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error().is_some_and(|db| {
+        db.message().contains("cannot insert multiple commands into a prepared statement")
+            || (db.message().contains("prepared statement had") && db.message().contains("expected 1"))
+    })
 }
 
 fn affected_result(affected: u64, start: Instant) -> QueryResult {

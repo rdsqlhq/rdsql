@@ -5,6 +5,7 @@ import { safeInvoke } from '../../core/tauri/ipc';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import { quoteIdent } from '../../core/sql/ident';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
+import { isPostgresServer } from '../../core/connection/engines';
 
 interface CreateDatabaseModalProps {
   connection: DatabaseConnection;
@@ -47,7 +48,7 @@ export const CreateDatabaseModal: React.FC<CreateDatabaseModalProps> = ({
   const [success, setSuccess] = useState(false);
 
   const unsupported = connection.engine === 'sqlite' || connection.engine === 'duckdb';
-  const isPostgres = connection.engine === 'postgres';
+  const isPostgres = isPostgresServer(connection.engine);
 
   const handleCreate = async () => {
     const trimmed = name.trim();

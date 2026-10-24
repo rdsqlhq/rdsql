@@ -260,7 +260,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
       sessionRef.current = await safeInvoke<string>('session_open', { config: connection });
       if (fromIndex === 0) return;
       for (const [i, item] of plan.items.entries()) {
-        if (i < fromIndex && item.category === 'fk_disable') await execute(item.statement, i);
+        if (i < fromIndex && item.category === 'fk_disable') await execute(item.statement, i).catch(() => {});
       }
     };
 
@@ -287,8 +287,17 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
           await execute(stmt, i);
           appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: OK`, 'success');
         } catch (err: any) {
-          errorBox.any = true;
           const msg = err?.message || String(err);
+          // Turning FK checks off/on is an optimization, not data: Postgres'
+          // `session_replication_role` needs superuser, which managed hosts
+          // (Neon, RDS, Supabase) never grant. The backup already orders
+          // tables parents-first, so carry on without it.
+          if ((item.category === 'fk_disable' || item.category === 'fk_enable') && !/session has ended/i.test(msg)) {
+            appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: skipped — ${msg}. Continuing without it.`);
+            setProgress(i + 1);
+            continue;
+          }
+          errorBox.any = true;
           appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: FAILED — ${msg}`, 'error');
           // A lost connection ends the session; Resume opens a new one.
           if (/session has ended|connection/i.test(msg)) await closeSession();

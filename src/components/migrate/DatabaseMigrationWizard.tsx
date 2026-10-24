@@ -314,7 +314,9 @@ export const DatabaseMigrationWizard: React.FC = () => {
             onBack={() => setStep('preview')}
             onStart={startRun}
             onCancel={cancelRun}
-            hasStarted={step === 'run' || step === 'done'}
+            // Only once Run was pressed: on step 3 before that, the user
+            // still has to type the confirmation and press Run.
+            hasStarted={running}
           />
         )}
       </div>

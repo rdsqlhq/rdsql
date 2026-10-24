@@ -24,6 +24,7 @@ import { AIError, type AIConfig, type GenerateInput, type GenerateResult, type M
 function dialectFor(engine?: string): string {
   switch (engine) {
     case 'postgres':
+    case 'neon':
     case 'cockroachdb':
     case 'yugabytedb':
       return 'PostgreSQL';

@@ -36,6 +36,7 @@ export function groupKind(engine: string): GroupKind {
     case 'planetscale':
       return 'database';
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -74,6 +75,7 @@ export function getDatabaseCapabilities(engine: string): DatabaseCapabilities {
     case 'planetscale':
       return { supportsDrop: true, supportsCreate: true, supportsEmpty: true, entityLabel: 'Database' };
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -151,6 +153,7 @@ export function dropDatabaseSql(engine: string, name: string): string | null {
     case 'planetscale':
       return `DROP DATABASE ${q};`;
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -182,6 +185,7 @@ export function createDatabaseSql(engine: string, name: string, charset?: string
       return `${sql};`;
     }
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -229,6 +233,7 @@ export function emptyDatabaseSql(
       }
       return stmts;
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':

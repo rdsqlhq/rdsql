@@ -31,6 +31,8 @@ export const ENGINE_REGISTRY: EngineMeta[] = [
   // Order by real-world popularity (DB-Engines / Stack Overflow Survey):
   // PostgreSQL, MySQL, and SQLite dominate; the rest follow by adoption.
   { id: 'postgres', label: 'PostgreSQL', family: 'postgres', defaultPort: 5432, color: '#5A9FD4' },
+  // Neon is managed PostgreSQL: the same server, reached over TLS.
+  { id: 'neon', label: 'Neon', family: 'postgres', defaultPort: 5432, color: '#00E599' },
   { id: 'mysql', label: 'MySQL', family: 'mysql', defaultPort: 3306, color: '#5B9BD5' },
   { id: 'sqlite', label: 'SQLite', family: 'sqlite', color: '#35B8E6' },
   { id: 'mariadb', label: 'MariaDB', family: 'mysql', defaultPort: 3306, color: '#3FBDBA' },
@@ -65,6 +67,7 @@ export function engineFamily(engine: string): EngineFamily {
   switch (e) {
     case 'postgres':
     case 'postgresql':
+    case 'neon':
     case 'cockroachdb':
     case 'yugabytedb':
       return 'postgres';
@@ -84,6 +87,12 @@ export function engineFamily(engine: string): EngineFamily {
       return 'sqlite';
   }
 }
+
+/** An actual PostgreSQL server (PostgreSQL itself or Neon), as opposed to
+ *  one that only speaks its wire protocol (CockroachDB, YugabyteDB). For
+ *  features that use Postgres-only catalogs and functions such as pg_roles,
+ *  pg_cancel_backend or CREATE DATABASE ... TEMPLATE. */
+export const isPostgresServer = (engine: string | undefined): boolean => ['postgres', 'postgresql', 'neon'].includes((engine || '').toLowerCase());
 
 /** Convenience predicates matching the family helpers in the backend. */
 export const isPostgresFamily = (engine: string): boolean => engineFamily(engine) === 'postgres';

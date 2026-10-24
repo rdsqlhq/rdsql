@@ -24,8 +24,6 @@ Install rdSQL Desktop and get to a working connection in a few minutes.
    guides below), and click **Save** (or **Test** first to confirm it connects).
 4. **Run a query** — select the new connection, open a SQL editor tab, and
    run a query. See [`sql-editor.md`](sql-editor.md).
-5. **(Optional) Sign in** for cross-device sync of connections and encrypted
-   credentials, from the account/settings panel.
 
 ## Expected result
 

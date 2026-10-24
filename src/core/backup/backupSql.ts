@@ -4,10 +4,13 @@ import { engineFamily, isMssqlFamily, isMysqlFamily } from '../connection/engine
 
 /** Quotes text as a single-quoted SQL string. MySQL-family servers treat a
  *  backslash as an escape character by default, so it is doubled there;
- *  otherwise `C:\new` would come back with a newline in it. */
+ *  otherwise `C:\new` would come back with a newline in it. SQL Server
+ *  strings get the N prefix: without it the text is read in the database's
+ *  code page and anything outside it (emoji, 中文) turns into `?`. */
 export function quoteSqlString(text: string, engine?: string): string {
   let s = text.replace(/'/g, "''");
   if (engine && isMysqlFamily(engine)) s = s.replace(/\\/g, '\\\\');
+  if (engine && isMssqlFamily(engine)) return `N'${s}'`;
   return `'${s}'`;
 }
 
@@ -126,17 +129,105 @@ export function pickChunkStrategy(table: Pick<SchemaTableNode, 'children'>): Chu
   return { mode: 'offset', orderColumns: firstCol ? [firstCol] : [] };
 }
 
+/** Postgres-family backup reads: every column cast to `::text`, so each value
+ *  comes back in Postgres' own text form, which it reads back unchanged on
+ *  INSERT. Without this, types the driver can't decode (interval, inet,
+ *  money, bit, timetz, ...) come back as NULL and bytea as a "<n bytes>"
+ *  placeholder. Columns are read through the alias `t`, so WHERE/ORDER BY
+ *  (written as `t."col"`) still compare the real typed column, not its text.
+ *  Returns null when the plain `SELECT *` should be used instead. */
+/** A column as the chunk readers need it: its name and declared type. */
+export type ChunkColumn = { name: string; data_type?: string };
+
+/** Columns holding raw bytes, on engines whose driver returns them as a
+ *  "<binary n bytes>" placeholder (MySQL family, SQLite, DuckDB, SQL Server)
+ *  rather than the bytes. Backup reads these as hex and writes them back as
+ *  a hex literal (see `hexLiteral`). Postgres doesn't need this: its reads
+ *  are `::text` (see `textSelectList`). */
+export function hexColumns(engine: DatabaseEngine | string, columns: ChunkColumn[] | undefined): Set<string> {
+  if (!columns) return new Set();
+  const fam = engineFamily(engine);
+  const pattern =
+    fam === 'mysql' ? /binary|blob|^bit\b/i : fam === 'sqlite' || fam === 'duckdb' ? /blob|binary|bytea/i : fam === 'mssql' ? /binary|image/i : null;
+  if (!pattern) return new Set();
+  return new Set(columns.filter((c) => pattern.test(c.data_type || '')).map((c) => c.name));
+}
+
+/** The hex-reading expression for column `ident` (see `hexColumns`). */
+function hexRead(engine: DatabaseEngine | string, ident: string): string {
+  if (isMssqlFamily(engine)) return `CONVERT(VARCHAR(MAX), ${ident}, 2)`;
+  if (isMysqlFamily(engine)) return `HEX(${ident})`;
+  // SQLite's hex(NULL) is '' (DuckDB's is NULL), which would come back as an
+  // empty blob instead of NULL.
+  if (engineFamily(engine) === 'sqlite') return `CASE WHEN ${ident} IS NULL THEN NULL ELSE hex(${ident}) END`;
+  return `hex(${ident})`;
+}
+
+/** Bytes literal for a hex string read by `hexRead`. MySQL's HEX() of a BIT
+ *  value drops leading zeros (b'1' → "1"), so odd lengths get a leading 0. */
+export function hexLiteral(hex: unknown, engine: DatabaseEngine | string = 'mysql'): string {
+  let h = String(hex);
+  if (h.length % 2) h = '0' + h;
+  if (isMssqlFamily(engine)) return `0x${h}`;
+  if (engineFamily(engine) === 'duckdb') return `unhex('${h}')`;
+  return `X'${h}'`;
+}
+
+function textSelectList(engine: DatabaseEngine | string, columns: ChunkColumn[] | undefined): string | null {
+  if (!columns || columns.length === 0) return null;
+  if (engineFamily(engine) === 'postgres') {
+    return columns.map((c) => `t.${quoteIdent(engine, c.name)}::text AS ${quoteIdent(engine, c.name)}`).join(', ');
+  }
+  const hex = hexColumns(engine, columns);
+  if (isMssqlFamily(engine)) {
+    // As for Postgres: read each value as exact text, which SQL Server
+    // converts back on INSERT. The driver's own values lose a
+    // datetimeoffset's offset, round floats and drop money's 4th decimal.
+    return columns
+      .map((c) => {
+        const ident = `t.${quoteIdent(engine, c.name)}`;
+        const ty = (c.data_type || '').toLowerCase();
+        const style = /date|time/.test(ty) ? 126 : /float|real/.test(ty) ? 3 : /money/.test(ty) ? 2 : null;
+        const expr = hex.has(c.name)
+          ? hexRead(engine, ident)
+          : style === null
+            ? `CONVERT(NVARCHAR(MAX), ${ident})`
+            : `CONVERT(NVARCHAR(MAX), ${ident}, ${style})`;
+        return `${expr} AS ${quoteIdent(engine, c.name)}`;
+      })
+      .join(', ');
+  }
+  if (hex.size === 0) return null;
+  return columns
+    .map((c) => {
+      const ident = `t.${quoteIdent(engine, c.name)}`;
+      return hex.has(c.name) ? `${hexRead(engine, ident)} AS ${quoteIdent(engine, c.name)}` : ident;
+    })
+    .join(', ');
+}
+
 /** Keyset page: rows with `pk > afterValue`, ordered by `pk`, capped at
- *  `limit`. Pass `afterValue = null` for the first page. */
+ *  `limit`. Pass `afterValue = null` for the first page. `columns` (the
+ *  table's columns) enables the text/hex reads above. */
 export function selectKeysetChunkSql(
   engine: DatabaseEngine | string,
   tableName: string,
   schemaName: string | undefined,
   pkColumn: string,
   afterValue: unknown,
-  limit: number
+  limit: number,
+  columns?: ChunkColumn[]
 ): string {
   const target = qualifiedTable(engine, tableName, schemaName);
+  const textList = textSelectList(engine, columns);
+  if (textList) {
+    const pk = `t.${quoteIdent(engine, pkColumn)}`;
+    // A binary key was read as HEX(), so compare against its bytes.
+    const after = hexColumns(engine, columns).has(pkColumn) ? hexLiteral(afterValue, engine) : sqlLiteral(afterValue, engine);
+    const where = afterValue === null || afterValue === undefined ? '' : ` WHERE ${pk} > ${after}`;
+    if (isMssqlFamily(engine)) return `SELECT TOP ${Math.floor(limit)} ${textList} FROM ${target} t${where} ORDER BY ${pk} ASC;`;
+    return `SELECT ${textList} FROM ${target} t${where} ORDER BY ${pk} ASC LIMIT ${Math.floor(limit)};`;
+  }
   const pkIdent = quoteIdent(engine, pkColumn);
   const where = afterValue === null || afterValue === undefined ? '' : ` WHERE ${pkIdent} > ${sqlLiteral(afterValue, engine)}`;
   if (isMssqlFamily(engine)) {
@@ -153,9 +244,18 @@ export function selectOffsetChunkSql(
   schemaName: string | undefined,
   orderColumns: string[],
   offset: number,
-  limit: number
+  limit: number,
+  columns?: ChunkColumn[]
 ): string {
   const target = qualifiedTable(engine, tableName, schemaName);
+  const textList = textSelectList(engine, columns);
+  if (textList) {
+    const order = orderColumns.map((c) => `t.${quoteIdent(engine, c)} ASC`).join(', ');
+    if (isMssqlFamily(engine)) {
+      return `SELECT ${textList} FROM ${target} t ORDER BY ${order || '(SELECT NULL)'} OFFSET ${Math.floor(offset)} ROWS FETCH NEXT ${Math.floor(limit)} ROWS ONLY;`;
+    }
+    return `SELECT ${textList} FROM ${target} t${order ? ` ORDER BY ${order}` : ''} LIMIT ${Math.floor(limit)} OFFSET ${Math.floor(offset)};`;
+  }
   const orderList = orderColumns.map((c) => `${quoteIdent(engine, c)} ASC`).join(', ');
   if (isMssqlFamily(engine)) {
     // OFFSET/FETCH requires an ORDER BY; fall back to the standard
@@ -179,10 +279,14 @@ export function selectOffsetChunkSql(
 export function generateCreateTableSql(
   engine: DatabaseEngine | string,
   table: SchemaTableNode,
-  schemaName?: string
+  schemaName?: string,
+  /** Postgres user-defined type names (enums) used by the columns. Those
+   *  names are quoted, since they are case-sensitive. */
+  userTypes?: Set<string>
 ): string {
   const target = qualifiedTable(engine, table.name, schemaName);
   const pkCols = table.children.filter((c) => c.is_primary_key).map((c) => c.name);
+  const isPg = engineFamily(engine) === 'postgres';
 
   const lines = table.children.map((col) => {
     let dt = col.data_type || 'TEXT';
@@ -196,8 +300,21 @@ export function generateCreateTableSql(
         dt = `${lowerDt}(255)`;
       }
     }
+    const def = isPg ? col.column_default?.trim() : undefined;
+    if (isPg) {
+      const base = dt.replace(/(\[\])+$/, '');
+      if (userTypes?.has(base)) dt = qualifiedTable(engine, base, schemaName) + dt.slice(base.length);
+      // A nextval() default points at a sequence the target doesn't have;
+      // serial types create it along with the table.
+      if (def && /^nextval\(/i.test(def)) dt = PG_SERIAL_TYPES[dt.toLowerCase()] ?? dt;
+    }
     const parts = [quoteIdent(engine, col.name), dt];
     if (col.is_nullable === false) parts.push('NOT NULL');
+    if (def && /^GENERATED BY DEFAULT AS IDENTITY$/i.test(def)) parts.push(def);
+    else if (def && !/^nextval\(/i.test(def)) parts.push(`DEFAULT ${def}`);
+    // MySQL-family and SQL Server trees report the whole clause (DEFAULT /
+    // AUTO_INCREMENT / IDENTITY / ON UPDATE), already in the server's syntax.
+    if ((isMysqlFamily(engine) || isMssqlFamily(engine)) && col.column_default) parts.push(col.column_default);
     return `  ${parts.join(' ')}`;
   });
 
@@ -205,7 +322,56 @@ export function generateCreateTableSql(
     lines.push(`  PRIMARY KEY (${pkCols.map((c) => quoteIdent(engine, c)).join(', ')})`);
   }
 
+  // T-SQL has no CREATE TABLE IF NOT EXISTS.
+  if (isMssqlFamily(engine)) {
+    return `IF OBJECT_ID(${quoteSqlString(target, engine)}, N'U') IS NULL CREATE TABLE ${target} (\n${lines.join(',\n')}\n);`;
+  }
   return `CREATE TABLE IF NOT EXISTS ${target} (\n${lines.join(',\n')}\n);`;
+}
+
+/** SQL Server: a table whose IDENTITY column gets explicit values must have
+ *  IDENTITY_INSERT on for that session while its rows go in (one table at a
+ *  time). Returns the ON and OFF statements, or null when not needed. */
+export function mssqlIdentityInsertSql(
+  engine: DatabaseEngine | string,
+  table: Pick<SchemaTableNode, 'name' | 'children'>,
+  schemaName?: string
+): { on: string; off: string } | null {
+  if (!isMssqlFamily(engine) || !table.children.some((c) => /^IDENTITY/i.test(c.column_default || ''))) return null;
+  const target = qualifiedTable(engine, table.name, schemaName);
+  return { on: `SET IDENTITY_INSERT ${target} ON;`, off: `SET IDENTITY_INSERT ${target} OFF;` };
+}
+
+const PG_SERIAL_TYPES: Record<string, string> = { integer: 'serial', bigint: 'bigserial', smallint: 'smallserial' };
+
+/** True for a Postgres column whose values come from a sequence (serial or
+ *  identity), which has to be moved past the restored rows. */
+export function isPgSequenceColumn(engine: DatabaseEngine | string, col: { column_default?: string | null }): boolean {
+  if (engineFamily(engine) !== 'postgres' || !col.column_default) return false;
+  return /^nextval\(/i.test(col.column_default) || /^GENERATED BY DEFAULT AS IDENTITY$/i.test(col.column_default);
+}
+
+/** After a restore inserts explicit ids, moves the column's sequence past the
+ *  largest one so the next insert doesn't collide with a restored row. */
+export function pgSequenceResetSql(engine: DatabaseEngine | string, tableName: string, column: string, schemaName?: string): string {
+  const target = qualifiedTable(engine, tableName, schemaName);
+  const col = quoteIdent(engine, column);
+  return `SELECT setval(pg_get_serial_sequence(${quoteSqlString(target)}, ${quoteSqlString(column)}), COALESCE(MAX(${col}), 0) + 1, false) FROM ${target};`;
+}
+
+/** Lists the enum types in a Postgres schema with their labels in order. */
+export function pgEnumTypesSql(schema: string): string {
+  return `SELECT t.typname::text AS name, array_agg(e.enumlabel::text ORDER BY e.enumsortorder) AS labels FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = ${quoteSqlString(schema)} GROUP BY t.typname ORDER BY t.typname;`;
+}
+
+/** Creates an enum type unless one with that name already exists, so a
+ *  backup can be restored again into the same database. */
+export function createPgEnumSql(engine: DatabaseEngine | string, name: string, labels: string[], schemaName?: string): string {
+  const target = qualifiedTable(engine, name, schemaName);
+  const values = labels.map((l) => quoteSqlString(l)).join(', ');
+  // CockroachDB has no DO blocks, but (unlike Postgres) has IF NOT EXISTS.
+  if (engine === 'cockroachdb') return `CREATE TYPE IF NOT EXISTS ${target} AS ENUM (${values});`;
+  return `DO $$ BEGIN CREATE TYPE ${target} AS ENUM (${values}); EXCEPTION WHEN duplicate_object THEN NULL; END $$;`;
 }
 
 /** Batches rows into multi-row INSERT statements so a large table doesn't
@@ -216,7 +382,9 @@ export function generateInsertStatements(
   schemaName: string | undefined,
   columns: QueryColumn[],
   rows: unknown[][],
-  batchSize = 200
+  batchSize = 200,
+  /** Columns read as hex (see `hexColumns`), written as hex literals. */
+  hexColumns?: Set<string>
 ): string[] {
   if (rows.length === 0 || columns.length === 0) return [];
   const target = qualifiedTable(engine, tableName, schemaName);
@@ -225,7 +393,9 @@ export function generateInsertStatements(
 
   for (let i = 0; i < rows.length; i += batchSize) {
     const chunk = rows.slice(i, i + batchSize);
-    const valuesSql = chunk.map((row) => `(${row.map((v, ci) => sqlLiteral(v, engine, columns[ci]?.data_type)).join(', ')})`).join(',\n  ');
+    const literal = (v: unknown, ci: number) =>
+      hexColumns?.has(columns[ci]?.name) && v !== null && v !== undefined ? hexLiteral(v, engine) : sqlLiteral(v, engine, columns[ci]?.data_type);
+    const valuesSql = chunk.map((row) => `(${row.map(literal).join(', ')})`).join(',\n  ');
     statements.push(`INSERT INTO ${target} (${colNames}) VALUES\n  ${valuesSql};`);
   }
 

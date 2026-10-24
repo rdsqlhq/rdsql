@@ -22,12 +22,16 @@ import { useConnectionStore } from '../../store/useConnectionStore';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import {
   generateInsertStatements,
+  hexColumns as binaryHexColumns,
+  mssqlIdentityInsertSql,
+  pgEnumTypesSql,
   pickChunkStrategy,
   selectKeysetChunkSql,
   selectOffsetChunkSql,
 } from '../../core/backup/backupSql';
 import { buildBackupPlan, generateDataStatements, type TableSelection } from '../../core/backup/backupEngine';
-import { isMysqlFamily } from '../../core/connection/engines';
+import { engineFamily, engineMeta, isPostgresServer } from '../../core/connection/engines';
+import { quoteIdent } from '../../core/sql/ident';
 import { describeFsError } from '../../core/utils/fsErrors';
 import { copyToClipboard } from '../../core/utils/clipboard';
 import { tempDir } from '../../core/utils/tempDir';
@@ -48,6 +52,10 @@ interface BackupModalProps {
 }
 
 type LogKind = 'info' | 'success' | 'error';
+
+/** Engines whose connection is one database file (or one D1 database), so a
+ *  DB-to-DB backup has no database to pick on the target. */
+const isSingleDatabase = (engine: string) => engine === 'sqlite' || engine === 'cloudflare-d1' || engine === 'duckdb';
 
 /** Build a deterministic S3 key for a backup under the user's chosen path.
  *  If `s3Path` already names a full filename (has a suffix), use it verbatim;
@@ -98,11 +106,20 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
   useEscapeToClose(running ? null : onClose);
   // Only show same-engine connections as valid backup destinations — types are
   // emitted verbatim (no cross-engine conversion), so a MySQL→Postgres copy
-  // would produce invalid DDL.
+  // would produce invalid DDL. PostgreSQL and Neon count as the same engine:
+  // Neon is a managed PostgreSQL server.
   const sameEngineConnections = useMemo(
-    () => connections.filter((c) => c.id !== connection.id && c.engine === connection.engine),
+    () =>
+      connections.filter(
+        (c) =>
+          c.id !== connection.id &&
+          (c.engine === connection.engine || (isPostgresServer(c.engine) && isPostgresServer(connection.engine)))
+      ),
     [connections, connection.id, connection.engine]
   );
+
+  /** Which connections can be a DB-to-DB target, for the picker's labels. */
+  const targetEngineLabel = isPostgresServer(connection.engine) ? 'PostgreSQL / Neon' : engineMeta(connection.engine).label;
 
   const [groups, setGroups] = useState<SchemaGroupNode[]>([]);
   const [loadingTree, setLoadingTree] = useState(true);
@@ -111,7 +128,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
 
   const [destination, setDestination] = useState<'file' | 'connection' | 's3'>('file');
   const [targetConnectionId, setTargetConnectionId] = useState<string>('');
-  /** Databases discovered on the target connection (fetched lazily when picked). */
+  /** Databases discovered on the target connection (fetched lazily when
+   *  picked). For Postgres-family targets these are the schemas inside the
+   *  connection's database: that is what its schema tree lists, and a
+   *  Postgres connection can't switch database mid-session anyway. */
   const [targetDatabases, setTargetDatabases] = useState<string[]>([]);
   const [targetDbLoading, setTargetDbLoading] = useState(false);
   const [targetDatabaseName, setTargetDatabaseName] = useState<string>('');
@@ -176,6 +196,19 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
    *  modal instance stays mounted — closing it discards the checkpoint,
    *  same as any in-memory progress. */
   const resumeRef = useRef<(() => Promise<void>) | null>(null);
+  /** One session on the destination connection for a "DB Connection" run,
+   *  so the FK-disable setting stays in effect for every statement after it
+   *  and the TLS handshake happens once instead of once per statement. Kept
+   *  open while paused so Resume continues on it. */
+  const sessionRef = useRef<string | null>(null);
+
+  const closeSession = async () => {
+    const id = sessionRef.current;
+    sessionRef.current = null;
+    if (id) await safeInvoke('session_close', { sessionId: id }).catch(() => {});
+  };
+
+  useEffect(() => () => { void closeSession(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll the log to the bottom whenever new entries arrive so the user
   // always sees the latest progress without manual scrolling.
@@ -207,8 +240,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connection.id]);
 
+  // Views are left out: a backup recreates each entry as a CREATE TABLE and
+  // copies its rows, which for a view (e.g. pg_stat_statements) would turn
+  // it into a stale table on restore.
   const groupTables: SchemaTableNode[] = useMemo(
-    () => groups.find((g) => g.name === selectedGroupName)?.children || [],
+    () => (groups.find((g) => g.name === selectedGroupName)?.children || []).filter((t) => t.node_type !== 'view'),
     [groups, selectedGroupName]
   );
 
@@ -235,7 +271,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     const targetConn = connections.find((c) => c.id === targetConnectionId);
     if (!targetConn) return;
     // File-based engines don't have multiple databases.
-    if (targetConn.engine === 'sqlite' || targetConn.engine === 'cloudflare-d1') {
+    if (isSingleDatabase(targetConn.engine)) {
       setTargetDatabases([]);
       setTargetDatabaseName(targetConn.database || '');
       return;
@@ -246,9 +282,15 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
       try {
         const tree = await safeInvoke<SchemaGroupNode[]>('fetch_schema_tree', { config: targetConn });
         if (cancelled) return;
-        const dbNames = (tree || []).map((g) => g.name);
+        let dbNames = (tree || []).map((g) => g.name);
+        // Postgres: the tree only lists schemas that hold tables, so an empty
+        // database has none. Always offer `public` and the source schema's
+        // name (created on the target if missing), and default to the source
+        // schema's name, else `public`, so the common case needs no pick.
+        const isPgTarget = engineFamily(targetConn.engine) === 'postgres';
+        if (isPgTarget) dbNames = [...new Set([...(selectedGroupName ? [selectedGroupName] : []), 'public', ...dbNames])];
         setTargetDatabases(dbNames);
-        setTargetDatabaseName('');
+        setTargetDatabaseName(isPgTarget ? dbNames[0] : '');
       } catch {
         if (!cancelled) setTargetDatabases([]);
       } finally {
@@ -258,7 +300,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     return () => {
       cancelled = true;
     };
-  }, [targetConnectionId, connections]);
+  }, [targetConnectionId, connections]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleAll = (field: keyof TableSelection, value: boolean) => {
     setSelections((prev) => {
@@ -340,8 +382,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
         return;
       }
       const targetConn = connections.find((c) => c.id === targetConnectionId);
-      if (targetConn && targetConn.engine !== 'sqlite' && targetConn.engine !== 'cloudflare-d1' && !targetDatabaseName) {
-        setLog([{ text: 'Choose a destination database on the target connection.', kind: 'error' }]);
+      if (targetConn && !isSingleDatabase(targetConn.engine) && !targetDatabaseName) {
+        setLog([{ text: `Choose a destination ${engineFamily(targetConn.engine) === 'postgres' ? 'schema' : 'database'} on the target connection.`, kind: 'error' }]);
         return;
       }
     }
@@ -366,6 +408,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     setStmtProgress(null);
     setRowProgress(null);
     resumeRef.current = null;
+    await closeSession();
 
     const targetConn =
       destination === 'connection' ? connections.find((c) => c.id === targetConnectionId) || null : null;
@@ -379,13 +422,34 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     // database the target connection is pointed at, regardless of what this
     // source database is named); `qualifyWithDbName` opts back into the old
     // self-contained-with-explicit-name behavior.
+    const sourceSchema = selectedGroupName || connection.database || '';
+    const isPg = engineFamily(connection.engine) === 'postgres';
+    let pgEnums: { name: string; labels: string[] }[] = [];
+    if (isPg && sourceSchema) {
+      try {
+        const res = await safeInvoke<QueryResultData>('execute_query', {
+          request: { config: connection, sql: pgEnumTypesSql(sourceSchema) },
+          queryId: `backup_enums_${Date.now()}`,
+        });
+        pgEnums = res.rows.map((r) => ({ name: String(r[0]), labels: (r[1] as unknown as string[]) || [] }));
+      } catch (err: any) {
+        appendLog(`Warning: could not read enum types (${err?.message || err}). Tables using them may fail to create.`, 'error');
+      }
+    }
+
     const plan = buildBackupPlan({
       engine: connection.engine,
       tables: chosenTables,
       selections,
-      schema: selectedGroupName || connection.database || '',
+      schema: sourceSchema,
       writeMode,
-      targetSchema: destination === 'connection' || !qualifyWithDbName ? null : undefined,
+      // Postgres: a live destination is the chosen schema of the target
+      // connection's own database, so every statement names that schema.
+      targetSchema:
+        destination === 'connection'
+          ? isPg && targetDatabaseName ? targetDatabaseName : null
+          : !qualifyWithDbName ? null : undefined,
+      pgEnums,
     });
 
     setTotalTables(plan.totalTables);
@@ -393,7 +457,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
 
     // Apply connection (for live-DB destination).
     const applyConn = targetConn
-      ? targetDatabaseName
+      ? targetDatabaseName && !isPg
         ? { ...targetConn, database: targetDatabaseName }
         : targetConn
       : null;
@@ -471,55 +535,77 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
       );
     }
 
-    // ── FK disable: attempt at runtime, gracefully fall back ─────────────
-    // For PostgreSQL, session_replication_role requires superuser. If it fails,
-    // we log a warning and rely on dependency ordering alone.
-    // NOTE: each `execute_query` IPC call opens its own DB connection (see
-    // query.rs) — a pragma/SET set in one call does not carry over to the
-    // next. Against a live "connection" destination this only actually
-    // protects statements sent in the SAME call as the disable itself; the
-    // topological table ordering (parents before children) is what really
-    // keeps inserts FK-safe here. Left as-is — fixing that needs a
-    // session-scoped connection on the Rust side, out of scope for this pass.
-    let fkDisabled = false;
-    if (plan.capabilities.canDisableFkChecks && plan.capabilities.fkDisableSql) {
-      await writeChunk(plan.capabilities.fkDisableSql + '\n\n');
-      if (destination === 'connection' && applyConn) {
-        try {
-          await safeInvoke('execute_query', { request: { config: applyConn, sql: plan.capabilities.fkDisableSql }, queryId: `backup_fk_off_${Date.now()}` });
-          fkDisabled = true;
-        } catch {
-          appendLog(`Warning: Could not disable FK checks (${plan.capabilities.engine} privilege required). Relying on dependency ordering.`, 'error');
-        }
-      }
-    }
-
     const errorBox = { any: false };
     let tablesCompleted = 0;
 
-    // Every `execute_query` IPC call opens its OWN fresh DB connection (see
-    // query.rs) — the one-shot `SET FOREIGN_KEY_CHECKS = 0` issued above ran
-    // on a connection that's already gone, so DROP/CREATE/INSERT sent here
-    // land with FK enforcement back at its default (on). That breaks a live
-    // MySQL restore two ways: `DROP TABLE` on an FK-referenced parent fails,
-    // so the stale table survives `CREATE TABLE IF NOT EXISTS` and a later
-    // `INSERT` hits the old schema ("Unknown column ..."). Re-issue the
-    // disable as a prefix in the SAME call as the statements it must protect.
-    // MySQL-family only: it needs no privilege and mysql_async runs the
-    // multi-statement string fine; Postgres' `session_replication_role`
-    // needs superuser and would turn one tolerated failure into one per
-    // batch, and other engines' per-call drivers may reject multi-statement.
-    const fkPrefix =
-      destination === 'connection' &&
-      isMysqlFamily(connection.engine) &&
-      plan.capabilities.canDisableFkChecks &&
-      plan.capabilities.fkDisableSql
-        ? plan.capabilities.fkDisableSql.trim().replace(/;+\s*$/, '') + ';\n'
-        : '';
+    /** Error text from the backend, with Postgres' DETAIL/HINT when present. */
+    const describeError = (err: any): string => {
+      let msg = err?.message || String(err);
+      try {
+        const parsed = JSON.parse(msg);
+        msg = parsed.message || msg;
+        if (parsed.detail) msg += `\nDETAIL: ${parsed.detail}`;
+        if (parsed.hint) msg += `\nHINT: ${parsed.hint}`;
+      } catch {
+        // Not JSON — use the raw string.
+      }
+      return msg;
+    };
 
-    // Helper: execute a batch of SQL statements against the destination. In
-    // 'fast' mode, all statements are joined into one IPC call (one connection
-    // cycle). In 'safe' mode, each statement gets its own IPC call.
+    const runOnTarget = (sql: string, label: string) =>
+      safeInvoke('session_execute', {
+        sessionId: sessionRef.current,
+        sql,
+        queryId: `backup_${label}_${Date.now()}`,
+        __meta: { source: 'backup' },
+      });
+
+    /** Opens the destination session if there is none (first run, or it was
+     *  lost while paused) and turns FK checks off on it. Turning them off is
+     *  best-effort: Postgres' `session_replication_role` needs superuser,
+     *  which managed hosts (Neon, RDS, Supabase) don't grant, and the plan
+     *  already orders tables parents-first. */
+    let fkDisabled = false;
+    const ensureTargetSession = async (): Promise<boolean> => {
+      if (!applyConn) return true;
+      if (sessionRef.current) return true;
+      try {
+        sessionRef.current = await safeInvoke<string>('session_open', { config: applyConn });
+      } catch (err: any) {
+        errorBox.any = true;
+        appendLog(`Could not connect to the destination: ${describeError(err)}`, 'error');
+        return false;
+      }
+      if (plan.capabilities.canDisableFkChecks && plan.capabilities.fkDisableSql) {
+        try {
+          await runOnTarget(plan.capabilities.fkDisableSql, 'fk_off');
+          fkDisabled = true;
+        } catch (err: any) {
+          fkDisabled = false;
+          appendLog(`Note: FK checks stay on (${describeError(err)}). Relying on table order instead.`);
+        }
+      }
+      return true;
+    };
+
+    if (plan.capabilities.canDisableFkChecks && plan.capabilities.fkDisableSql) {
+      await writeChunk(plan.capabilities.fkDisableSql + '\n\n');
+    }
+    if (destination === 'connection' && isPg && plan.targetSchema && applyConn) {
+      plan.items.unshift({ id: 'create_schema', table: '', phase: 'schema', sql: `CREATE SCHEMA IF NOT EXISTS ${quoteIdent(connection.engine, plan.targetSchema)};` });
+    }
+    if (destination === 'connection' && !(await ensureTargetSession())) {
+      setHadError(true);
+      setCurrentStep(null);
+      await persistLog(outputPath);
+      setRunning(false);
+      setDone(true);
+      return;
+    }
+
+    // Helper: execute a batch of SQL statements against the destination
+    // session. In 'fast' mode, all statements go in one call (one round
+    // trip). In 'safe' mode, each statement gets its own call.
     // The IPC layer logs every statement via `__meta: { source: 'backup' }`.
     const applyBatch = async (stmts: string[], label: string): Promise<boolean> => {
       if (stmts.length === 0) return true;
@@ -527,39 +613,18 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
       // produce empty statements (e.g. "...);\n;\nCREATE..." which MySQL rejects).
       const normalized = stmts.map((s) => s.trim().replace(/;+\s*$/, ''));
       try {
+        if (!(await ensureTargetSession())) return false;
         if (speedMode === 'fast') {
-          // One IPC call for the entire batch — join with single semicolons.
-          const batchSql = fkPrefix + normalized.join(';\n');
-          await safeInvoke('execute_query', {
-            request: { config: applyConn!, sql: batchSql },
-            queryId: `backup_batch_${label}_${Date.now()}`,
-            __meta: { source: 'backup' },
-          });
+          await runOnTarget(normalized.join(';\n'), `batch_${label}`);
         } else {
-          // Safe mode: one IPC per statement (reliable, granular errors) —
-          // still prefixed, since each statement is its own fresh connection.
-          for (const stmt of normalized) {
-            await safeInvoke('execute_query', {
-              request: { config: applyConn!, sql: fkPrefix + stmt },
-              queryId: `backup_${label}_${Date.now()}`,
-              __meta: { source: 'backup' },
-            });
-          }
+          for (const stmt of normalized) await runOnTarget(stmt, label);
         }
         return true;
       } catch (err: any) {
         errorBox.any = true;
-        // Parse the full error message — the backend returns JSON with the
-        // complete server error including detail/hint.
-        let msg = err?.message || String(err);
-        try {
-          const parsed = JSON.parse(msg);
-          msg = parsed.message || msg;
-          if (parsed.detail) msg += `\nDETAIL: ${parsed.detail}`;
-          if (parsed.hint) msg += `\nHINT: ${parsed.hint}`;
-        } catch {
-          // Not JSON — use the raw string.
-        }
+        const msg = describeError(err);
+        // A lost connection ends the session; the next call opens a new one.
+        if (/session has ended|connection/i.test(msg)) await closeSession();
         const sqlPreview = normalized.length === 1 ? normalized[0].slice(0, 200) : `[${normalized.length} statements]`;
         appendLog(`  Failed (${label}): ${msg}${sqlPreview ? ` — ${sqlPreview}` : ''}`, 'error');
         return false;
@@ -599,6 +664,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     }
 
     if (schemaAborted) {
+      await closeSession();
       setHadError(true);
       setCurrentTable(null);
       setCurrentStep(null);
@@ -629,7 +695,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     /** Runs the finalize phase (FK re-enable, file save confirmation, S3
      *  upload) — only reached once every table has fully completed. */
     const finalizeRun = async () => {
-      const finalizeItems = plan.items.filter((i) => i.phase === 'finalize' && i.sql);
+      // The FK re-enable is handled below, once, on the session it applies to.
+      const finalizeItems = plan.items.filter((i) => i.phase === 'finalize' && i.sql && i.id !== 'finalize_fk_enable');
       for (const item of finalizeItems) {
         if (outputPath) await writeChunk('\n' + item.sql + '\n');
         if (destination === 'connection' && applyConn) await applyBatch([item.sql], 'finalize');
@@ -637,14 +704,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
 
       if (plan.capabilities.canDisableFkChecks && plan.capabilities.fkEnableSql) {
         if (outputPath) await writeChunk('\n' + plan.capabilities.fkEnableSql + '\n');
-        if (destination === 'connection' && applyConn && fkDisabled) {
-          try {
-            await safeInvoke('execute_query', { request: { config: applyConn, sql: plan.capabilities.fkEnableSql }, queryId: `backup_fk_on_${Date.now()}` });
-          } catch {
-            appendLog(`Warning: Could not re-enable FK checks. They may remain disabled for this session.`, 'error');
-          }
+        if (destination === 'connection' && applyConn && fkDisabled && sessionRef.current) {
+          await runOnTarget(plan.capabilities.fkEnableSql, 'fk_on').catch(() => {});
         }
       }
+      await closeSession();
 
       if (destination === 'file' && outputPath) {
         appendLog(`Saved to ${outputPath}`, 'success');
@@ -725,8 +789,23 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
         const item = dataItems[idx];
         const table = chosenTables.find((t) => t.name === item.table);
         const strategy = table ? pickChunkStrategy(table) : { mode: 'offset' as const, orderColumns: [] };
+        const columnNames = table?.children;
+        const hexColumns = binaryHexColumns(connection.engine, table?.children);
         const cursor: DataCursor =
           idx === fromIndex && resumeCursor ? resumeCursor : { mode: strategy.mode, lastKeyVal: null, offset: 0, rowsProcessed: 0 };
+        // SQL Server: explicit ids into an IDENTITY column (see
+        // mssqlIdentityInsertSql). Re-issued on resume, since it is per table.
+        const identityInsert = table ? mssqlIdentityInsertSql(connection.engine, table, plan.targetSchema) : null;
+        if (identityInsert) {
+          if (destination === 'connection' && applyConn) {
+            if (!(await applyBatch([identityInsert.on], `identity_on:${item.table}`)) && stopOnError) {
+              await pauseHere(idx, cursor);
+              return;
+            }
+          } else if (outputPath) {
+            await writeChunk(identityInsert.on + '\n');
+          }
+        }
 
         setCurrentTable(item.table);
         setCurrentStep('Reading & applying data…');
@@ -741,8 +820,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
 
           const chunkSql =
             strategy.mode === 'keyset' && strategy.keysetColumn
-              ? selectKeysetChunkSql(connection.engine, item.table, selectedGroupName || undefined, strategy.keysetColumn, cursor.lastKeyVal, chunkLimit)
-              : selectOffsetChunkSql(connection.engine, item.table, selectedGroupName || undefined, strategy.orderColumns, cursor.offset, chunkLimit);
+              ? selectKeysetChunkSql(connection.engine, item.table, selectedGroupName || undefined, strategy.keysetColumn, cursor.lastKeyVal, chunkLimit, columnNames)
+              : selectOffsetChunkSql(connection.engine, item.table, selectedGroupName || undefined, strategy.orderColumns, cursor.offset, chunkLimit, columnNames);
 
           let res: QueryResultData;
           try {
@@ -762,8 +841,8 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
 
           const stmts =
             destination === 'connection'
-              ? generateDataStatements(connection.engine, item.table, undefined, res.columns, res.rows)
-              : generateInsertStatements(connection.engine, item.table, selectedGroupName || undefined, res.columns, res.rows);
+              ? generateDataStatements(connection.engine, item.table, plan.targetSchema, res.columns, res.rows, hexColumns)
+              : generateInsertStatements(connection.engine, item.table, plan.targetSchema, res.columns, res.rows, undefined, hexColumns);
 
           if (destination === 'connection' && applyConn && stmts.length > 0) {
             const ok = await applyBatch(stmts, `data:${item.table}:${cursor.offset || cursor.rowsProcessed}`);
@@ -796,6 +875,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
           if (res.rows.length < chunkLimit) break; // short page = last page
         }
 
+        if (identityInsert) {
+          if (destination === 'connection' && applyConn) await applyBatch([identityInsert.off], `identity_off:${item.table}`);
+          else if (outputPath) await writeChunk(identityInsert.off + '\n');
+        }
         tablesCompleted = idx + 1;
         setProgress(tablesCompleted);
         if (tableFailed) {
@@ -969,7 +1052,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
                         ? 'bg-blue-600/20 border-blue-500/40 text-blue-400'
                         : 'bg-[#0f172a] border-[#1e293b] text-slate-400 hover:text-slate-200'
                     }`}
-                    title={`Backup to another ${connection.engine} connection`}
+                    title={`Backup to another ${targetEngineLabel} connection`}
                   >
                     <DatabaseIcon className="w-3.5 h-3.5" /> DB Connection
                   </button>
@@ -1085,7 +1168,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
                   </div>
                 ) : sameEngineConnections.length === 0 ? (
                   <div className="text-[11px] text-slate-500 italic py-2 text-center">
-                    No other {connection.engine} connections available.
+                    No other {targetEngineLabel} connections available.
                     <br />
                     Add a same-engine connection to enable DB-to-DB backup.
                   </div>
@@ -1093,7 +1176,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
                   <div className="space-y-2">
                     {/* Step 1: Pick connection */}
                     <div>
-                      <label className="block text-[9px] text-slate-500 mb-1">Connection ({connection.engine} only)</label>
+                      <label className="block text-[9px] text-slate-500 mb-1">Connection ({targetEngineLabel} only)</label>
                       <select
                         value={targetConnectionId}
                         onChange={(e) => {
@@ -1113,13 +1196,13 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
                     {/* Step 2: Pick database (skip for file-based engines) */}
                     {targetConnectionId && targetDatabases.length > 0 && (
                       <div>
-                        <label className="block text-[9px] text-slate-500 mb-1">Database</label>
+                        <label className="block text-[9px] text-slate-500 mb-1">{engineFamily(connection.engine) === 'postgres' ? 'Schema' : 'Database'}</label>
                         <select
                           value={targetDatabaseName}
                           onChange={(e) => setTargetDatabaseName(e.target.value)}
                           className="w-full h-8 box-border bg-[#0f172a] border border-[#1e293b] focus:border-blue-500 rounded px-2 text-xs text-slate-100 focus:outline-none"
                         >
-                          <option value="">Select a database...</option>
+                          <option value="">{engineFamily(connection.engine) === 'postgres' ? 'Select a schema...' : 'Select a database...'}</option>
                           {targetDatabases.map((db) => (
                             <option key={db} value={db}>{db}</option>
                           ))}

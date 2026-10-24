@@ -38,3 +38,9 @@ export function useIsPro(): boolean {
 export function useEditionLabel(): string {
   return useEdition() === 'pro' ? 'PRO' : 'COMMUNITY';
 }
+
+/** Cloud connection/settings sync is parked for now: every sync entry point
+ *  in the UI (Explorer footer, Account tab, Integrations card, sign-in copy)
+ *  checks this and hides itself. The sync code under `core/sync` and
+ *  `useSyncStore` stays intact — flip this to bring it back. */
+export const CLOUD_SYNC_ENABLED = false;

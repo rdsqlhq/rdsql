@@ -1,6 +1,6 @@
 {
   "name": "rdsql-desktop",
-  "version": "1.1.11",
+  "version": "1.2.0",
   "description": "Modern Database Workspace - Native Desktop Application powered by Tauri v2 + React 19",
   "private": true,
   "type": "module",

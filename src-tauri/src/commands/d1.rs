@@ -281,6 +281,7 @@ pub async fn fetch_d1_schema(config: &ConnectionConfig) -> Result<Vec<super::con
             is_foreign_key: None,
             is_nullable: None,
             has_default: None,
+            column_default: None,
             children: vec![],
         }]);
     }
@@ -330,6 +331,7 @@ pub async fn fetch_d1_schema(config: &ConnectionConfig) -> Result<Vec<super::con
                     is_foreign_key: Some(false),
                     is_nullable: Some(!not_null),
                     has_default: Some(has_default),
+                    column_default: None,
                     children: vec![],
                 });
             }
@@ -355,6 +357,7 @@ pub async fn fetch_d1_schema(config: &ConnectionConfig) -> Result<Vec<super::con
             is_foreign_key: None,
             is_nullable: None,
             has_default: None,
+            column_default: None,
             children: col_nodes,
         });
     }
@@ -370,6 +373,7 @@ pub async fn fetch_d1_schema(config: &ConnectionConfig) -> Result<Vec<super::con
         is_foreign_key: None,
         is_nullable: None,
         has_default: None,
+        column_default: None,
         children: table_nodes,
     }])
 }

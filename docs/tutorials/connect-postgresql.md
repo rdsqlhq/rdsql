@@ -1,9 +1,9 @@
-# Connect to PostgreSQL (and CockroachDB / YugabyteDB)
+# Connect to PostgreSQL (and Neon / CockroachDB / YugabyteDB)
 
 ## Purpose
 
-Add a PostgreSQL-compatible connection. This flow also covers CockroachDB and
-YugabyteDB, which use the same connection form (pick the matching engine).
+Add a PostgreSQL-compatible connection. This flow also covers Neon, CockroachDB
+and YugabyteDB, which use the same connection form (pick the matching engine).
 
 ## Requirements
 
@@ -15,9 +15,10 @@ YugabyteDB, which use the same connection form (pick the matching engine).
 
 1. Click **New Connection**.
 2. In the **Connection** tab, set a **Connection Name** and choose
-   **PostgreSQL** (or **CockroachDB** / **YugabyteDB**) as the
-   **Database Engine**. If your provider has a preset (e.g. a managed
-   Postgres host), pick it from **Provider Preset** to prefill defaults.
+   **PostgreSQL** (or **Neon** / **CockroachDB** / **YugabyteDB**) as the
+   **Database Engine**. Picking **Neon** turns on `SSL Mode: require`, which
+   Neon needs. You can also paste a connection URL instead of filling in the
+   fields; a `*.neon.tech` URL selects **Neon** by itself.
 3. Fill in **Host**, **Port**, **Database**, **Username**, **Password**.
 4. If your provider requires TLS, set **SSL Mode** accordingly.
 5. If the database is only reachable through a bastion host, open the
