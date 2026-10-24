@@ -1,0 +1,134 @@
+name: rdsql-e2e-backup
+
+# Backup/restore end-to-end test servers. See README.md in this folder.
+#
+# Each engine gets a seeded source server and an empty target server, so a
+# test can back up from one connection straight into another. Postgres source
+# and target run different major versions on purpose (16 → 17), the way a
+# real "copy prod into a newer server" job would.
+#
+# Ports are deliberately off the defaults (554xx/533xx) so this stack runs
+# next to any local Postgres/MySQL you already have. Passwords are dev-only.
+
+x-pg-health: &pg-health
+  test: ["CMD-SHELL", "pg_isready -U rdsql -d rdsql_src || pg_isready -U rdsql -d postgres"]
+  interval: 3s
+  timeout: 3s
+  retries: 60
+
+x-my-health: &my-health
+  test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -prdsql_dev_pw --silent || mariadb-admin ping -h 127.0.0.1 -uroot -prdsql_dev_pw --silent"]
+  interval: 3s
+  timeout: 3s
+  retries: 100
+
+services:
+  pg-src:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rdsql
+      POSTGRES_PASSWORD: rdsql_dev_pw
+      POSTGRES_DB: rdsql_src
+    ports: ["55432:5432"]
+    volumes: ["./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck: *pg-health
+
+  pg-dst:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rdsql
+      POSTGRES_PASSWORD: rdsql_dev_pw
+      POSTGRES_DB: postgres
+    ports: ["55433:5432"]
+    healthcheck: *pg-health
+
+  mysql-src:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: rdsql_dev_pw
+      MYSQL_DATABASE: rdsql_src
+    ports: ["53306:3306"]
+    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck: *my-health
+
+  mysql-dst:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: rdsql_dev_pw
+    ports: ["53307:3306"]
+    healthcheck: *my-health
+
+  mariadb-src:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: rdsql_dev_pw
+      MARIADB_DATABASE: rdsql_src
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    ports: ["53308:3306"]
+    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck: *my-health
+
+  mariadb-dst:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: rdsql_dev_pw
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    ports: ["53309:3306"]
+    healthcheck: *my-health
+
+  # ── Extra engines, one profile each (run one at a time: Docker Desktop's
+  # default 4 GB won't hold them all next to the six servers above). Each is
+  # a single server; the tests seed a source database on it through the app's
+  # own driver and copy into a second database on the same server.
+
+  cockroach:
+    profiles: ["cockroach"]
+    image: cockroachdb/cockroach:v24.3.5
+    command: start-single-node --insecure --cache=256MiB --max-sql-memory=256MiB
+    ports: ["56257:26257"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health?ready=1"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  yugabyte:
+    profiles: ["yugabyte"]
+    image: yugabytedb/yugabyte:2024.2.2.0-b70
+    # yugabyted's startup check runs `chronyc`, which this image doesn't ship;
+    # a stub that reports "no time sync service" lets it carry on.
+    entrypoint: ["bash", "-c"]
+    command:
+      - printf '#!/bin/sh\nexit 1\n' > /usr/local/bin/chronyc && chmod +x /usr/local/bin/chronyc && exec bin/yugabyted start --background=false --ui=false --tserver_flags=ysql_enable_auth=false
+    ports: ["55434:5433"]
+    healthcheck:
+      test: ["CMD-SHELL", "postgres/bin/pg_isready -h $$(hostname) -p 5433"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  tidb:
+    profiles: ["tidb"]
+    image: pingcap/tidb:v8.5.1
+    ports: ["54000:4000"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:10080/status || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  # Microsoft publishes no arm64 SQL Server image; azure-sql-edge speaks the
+  # same TDS/T-SQL and runs natively on Apple Silicon. On x86_64 you can use
+  # mcr.microsoft.com/mssql/server:2022-latest instead.
+  mssql:
+    profiles: ["mssql"]
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "rdSQL_dev_Passw0rd!"
+    ports: ["51433:1433"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1433' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60

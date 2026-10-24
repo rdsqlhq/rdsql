@@ -42,3 +42,6 @@ pub mod backend;
 pub mod migrate;
 // Local log file (tauri-plugin-log) + panic hook. See its module doc.
 pub mod app_log;
+// Line-based stand-in for Tauri IPC, used by the e2e suite under e2e/.
+#[cfg(test)]
+mod e2e_bridge;

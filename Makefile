@@ -80,7 +80,9 @@ APP_VERSION = $(shell sed -n '1,/^version = /s/^version = "\(.*\)"/\1/p' src-tau
 # Default goal: show help instead of silently running the first target.
 .DEFAULT_GOAL := help
 
-.PHONY: help check-rust check-node check-gh install dev dev-web typecheck lint build release setup run-release bundle installer clean clean-dist clean-target show-artifacts version check-versions bump publish release-watch release-publish updater-secrets backend-secrets build-artifacts build-macos-arm64 build-macos-x64
+E2E_BACKUP_COMPOSE = docker compose -f e2e/backup/docker-compose.yml
+
+.PHONY: e2e-backup e2e-backup-all e2e-backup-up e2e-backup-down help check-rust check-node check-gh install dev dev-web typecheck lint build release setup run-release bundle installer clean clean-dist clean-target show-artifacts version check-versions bump publish release-watch release-publish updater-secrets backend-secrets build-artifacts build-macos-arm64 build-macos-x64
 
 help: ## Show this help
 	@echo "rdSQL Desktop — available targets:"
@@ -143,6 +145,20 @@ typecheck: ## TypeScript typecheck (no emit)
 	$(PKG_MANAGER) exec -- tsc --noEmit
 
 lint: typecheck ## Typecheck (placeholder for a future eslint step)
+
+# --- End-to-end -------------------------------------------------------------
+
+e2e-backup-up: ## Start + seed the backup e2e servers (Postgres, MySQL, MariaDB)
+	$(E2E_BACKUP_COMPOSE) up -d --wait --wait-timeout 900
+
+e2e-backup: check-rust e2e-backup-up ## Run the backup/restore/migrate e2e suite (default stack + SQLite/DuckDB)
+	$(PKG_MANAGER) exec -- vitest run -c e2e/vitest.config.ts
+
+e2e-backup-all: check-rust ## Same, plus CockroachDB, YugabyteDB, TiDB and SQL Server (one at a time)
+	e2e/backup/run-all.sh
+
+e2e-backup-down: ## Stop the backup e2e servers and delete their data
+	$(E2E_BACKUP_COMPOSE) down -v
 
 # --- Builds -----------------------------------------------------------------
 
