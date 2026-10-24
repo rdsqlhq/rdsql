@@ -3,6 +3,43 @@
 All notable changes to rdSQL Desktop are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.2.0] - 2026-10-25
+
+### Added
+- **Neon** as a database engine. Pasting a `*.neon.tech` URL picks it, and SSL is required by
+  default. PostgreSQL and Neon connections can back up into each other.
+- Help menu and About dialog: **Star on GitHub** and **Sponsor** links.
+- An end-to-end suite (`e2e/backup`, `make e2e-backup` / `make e2e-backup-all`) that runs the
+  real Backup, Restore and Migrate screens against PostgreSQL, MySQL, MariaDB, SQLite,
+  DuckDB, CockroachDB, YugabyteDB, TiDB and SQL Server in Docker, and checks every copy row
+  for row.
+
+### Fixed
+- **Backup and restore**
+  - Restore into Neon, RDS, Supabase and other managed Postgres no longer stops at the first
+    line: switching FK checks off needs superuser, so it is now skipped with a note.
+  - Backup into another Postgres connection connected to a database named after the schema
+    (e.g. `public`). The target picker now chooses a schema, and works when the target
+    database is empty.
+  - Backup "Fast" mode failed on Postgres and CockroachDB (several statements per call), and
+    on SQLite silently kept only the first statement of each batch, about 4% of the rows.
+  - Values that came out empty or wrong in backups: Postgres json/jsonb/bytea/interval/inet/
+    money/bit/xml; MySQL, SQLite, DuckDB and SQL Server binary data; integers above 2^53.
+  - The copy now keeps column defaults, serial/identity sequences, AUTO_INCREMENT and enum
+    types, so the application can keep inserting rows. Views are no longer copied as tables.
+  - SQL Server backups work: valid table definitions with lengths, IDENTITY columns,
+    unicode text, exact dates, money and floats.
+- **Migrate Database**: the Run step never showed the Run button; Postgres → MySQL failed on
+  timezone columns; migrating from SQL Server failed to find tables and could crash.
+- **CockroachDB**: the schema tree failed to load and could leave the window stuck on
+  "Loading schema…".
+- **SQL Server**: `SET`, `USE` and `#temp` tables now carry over between statements on the
+  same connection, in the editor too.
+- The data grid shows json/jsonb, oid and xml values instead of NULL.
+
+### Removed
+- Cloud sync is hidden for now; nothing in the UI offers or advertises it.
+
 ## [1.1.0] - 2026-08-12
 
 ### Added

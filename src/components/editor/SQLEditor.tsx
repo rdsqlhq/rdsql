@@ -36,6 +36,7 @@ import {
 } from '../../core/sql/completion';
 import { formatSql } from '../../core/sql/format';
 import { saveExport, EXPORT_EVENT, type ExportEventDetail } from '../../core/export/resultExport';
+import { isPostgresServer } from '../../core/connection/engines';
 
 interface SQLEditorProps {
   tabId: string;
@@ -896,7 +897,7 @@ export const SQLEditor: React.FC<SQLEditorProps> = ({ tabId }) => {
                 dbMenuOpen ? 'bg-[#1e293b] text-white ring-1 ring-cyan-500/30' : 'bg-[#141e33] hover:bg-[#1e293b] text-slate-300'
               }`}
               title={
-                activeConn?.engine === 'postgres'
+                isPostgresServer(activeConn?.engine)
                   ? 'Select schema'
                   : 'Select database'
               }

@@ -10,6 +10,7 @@ import { useWorkspaceStore } from '../../store/useWorkspaceStore';
 import { isAIConfigured } from '../../core/ai/types';
 import { checkForUpdateAndNotify } from '../../core/updater';
 import { useAppVersion } from '../../core/hooks/useAppVersion';
+import { CLOUD_SYNC_ENABLED } from '../../core/config/edition';
 
 const FAMILY_LABEL: Record<string, string> = {
   postgres: 'PostgreSQL protocol',
@@ -21,7 +22,8 @@ const FAMILY_LABEL: Record<string, string> = {
 
 /** What this build supports and what is set up: the built-in database
  *  drivers with how many saved connections use each, and the status of the
- *  optional integrations (cloud sync, AI assistant, S3 storage, updates). */
+ *  optional integrations (cloud sync when enabled, AI assistant, S3 storage,
+ *  updates). */
 export const IntegrationsView: React.FC = () => {
   const connections = useConnectionStore((s) => s.connections);
   const setConnectionModalOpen = useConnectionStore((s) => s.setConnectionModalOpen);
@@ -98,7 +100,7 @@ export const IntegrationsView: React.FC = () => {
       <section className="flex flex-col gap-3">
         <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">Integrations</h3>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {integrations.map((it) => {
+          {integrations.filter((it) => CLOUD_SYNC_ENABLED || it.id !== 'sync').map((it) => {
             const Icon = it.icon;
             return (
               <div key={it.id} className="p-4 bg-[#0a0f18] border border-[#1e293b] rounded-xl flex gap-3">

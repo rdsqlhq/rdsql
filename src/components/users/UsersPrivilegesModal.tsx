@@ -16,6 +16,7 @@ import { safeInvoke } from '../../core/tauri/ipc';
 import { QueryResultData } from '../../core/domain/types';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
+import { isPostgresServer } from '../../core/connection/engines';
 
 interface DbUser {
   user: string;
@@ -37,7 +38,7 @@ async function runQuery(config: any, sql: string): Promise<QueryResultData> {
 }
 
 async function fetchUsers(config: any): Promise<DbUser[]> {
-  if (config.engine === 'postgres') {
+  if (isPostgresServer(config.engine)) {
     const res = await runQuery(config, "SELECT rolname FROM pg_roles WHERE rolcanlogin = true ORDER BY rolname;");
     return res.rows.map((r) => ({ user: String(r[0]) }));
   }
@@ -60,7 +61,7 @@ async function fetchUsers(config: any): Promise<DbUser[]> {
 }
 
 async function fetchDatabases(config: any): Promise<string[]> {
-  if (config.engine === 'postgres') {
+  if (isPostgresServer(config.engine)) {
     const res = await runQuery(config, "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;");
     return res.rows.map((r) => String(r[0]));
   }
@@ -78,7 +79,7 @@ async function fetchDatabases(config: any): Promise<string[]> {
 }
 
 async function fetchUserDatabaseAccess(config: any, user: DbUser, allDbs: string[]): Promise<Set<string>> {
-  if (config.engine === 'postgres') {
+  if (isPostgresServer(config.engine)) {
     const res = await runQuery(
       config,
       `SELECT datname FROM pg_database WHERE datistemplate = false AND has_database_privilege('${user.user.replace(/'/g, "''")}', datname, 'CONNECT');`
@@ -120,7 +121,7 @@ async function fetchUserDatabaseAccess(config: any, user: DbUser, allDbs: string
 }
 
 function grantSQL(engine: string, user: DbUser, db: string): string[] {
-  if (engine === 'postgres') {
+  if (isPostgresServer(engine)) {
     return [
       `GRANT CONNECT ON DATABASE ${q(engine, db)} TO ${q(engine, user.user)};`,
       `GRANT USAGE ON SCHEMA public TO ${q(engine, user.user)};`,
@@ -145,7 +146,7 @@ function grantSQL(engine: string, user: DbUser, db: string): string[] {
 }
 
 function revokeSQL(engine: string, user: DbUser, db: string): string[] {
-  if (engine === 'postgres') {
+  if (isPostgresServer(engine)) {
     return [
       `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM ${q(engine, user.user)};`,
       `REVOKE CONNECT ON DATABASE ${q(engine, db)} FROM ${q(engine, user.user)};`,
@@ -189,7 +190,7 @@ export const UsersPrivilegesModal: React.FC<{ embedded?: boolean; connectionId?:
   const [newHost, setNewHost] = useState('%');
 
   const engine = activeConn?.engine;
-  const supported = engine === 'postgres' || engine === 'mysql' || engine === 'mssql';
+  const supported = isPostgresServer(engine) || engine === 'mysql' || engine === 'mssql';
 
   useEffect(() => {
     // In embedded mode, fetch on mount; in modal mode, fetch when opened.
@@ -275,7 +276,7 @@ export const UsersPrivilegesModal: React.FC<{ embedded?: boolean; connectionId?:
     setError(null);
     try {
       let stmt: string;
-      if (engine === 'postgres') {
+      if (isPostgresServer(engine)) {
         stmt = `CREATE ROLE ${q(engine, newUsername)} LOGIN PASSWORD '${newPassword.replace(/'/g, "''")}';`;
       } else if (engine === 'mssql') {
         // A LOGIN is server-level (like a Postgres role) — per-database access
@@ -287,7 +288,7 @@ export const UsersPrivilegesModal: React.FC<{ embedded?: boolean; connectionId?:
       await runQuery(activeConn, stmt);
       const refreshed = await fetchUsers(activeConn);
       setUsers(refreshed);
-      const created = engine === 'postgres' || engine === 'mssql' ? { user: newUsername } : { user: newUsername, host: newHost };
+      const created = isPostgresServer(engine) || engine === 'mssql' ? { user: newUsername } : { user: newUsername, host: newHost };
       setSelectedUserKey(userKey(created));
       setShowNewUser(false);
       setNewUsername('');

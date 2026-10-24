@@ -336,6 +336,7 @@ pub async fn fetch_mongo_schema(config: &ConnectionConfig) -> Result<Vec<SchemaN
                 is_foreign_key: None,
                 is_nullable: None,
                 has_default: None,
+                column_default: None,
                 children: vec![],
             });
         }
@@ -351,6 +352,7 @@ pub async fn fetch_mongo_schema(config: &ConnectionConfig) -> Result<Vec<SchemaN
             is_foreign_key: None,
             is_nullable: None,
             has_default: None,
+            column_default: None,
             children: collection_nodes,
         });
     }

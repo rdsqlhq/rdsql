@@ -26,6 +26,7 @@ const ENGINE_ALIASES: Record<string, DatabaseEngine> = {
   pgsql: 'postgres',
   postgres: 'postgres',
   postgresql: 'postgres',
+  neon: 'neon',
   cockroachdb: 'cockroachdb',
   cockroach: 'cockroachdb',
   yugabyte: 'yugabytedb',
@@ -89,7 +90,8 @@ export function parseConnectionUrl(url: string): ParsedConnection {
     const parsed = new URL(url.trim());
     const proto = parsed.protocol.toLowerCase();
     if (proto.includes('postgres')) {
-      out.engine = 'postgres';
+      // Neon hands out plain postgres:// URLs on *.neon.tech hosts.
+      out.engine = /\.neon\.tech$/i.test(parsed.hostname) ? 'neon' : 'postgres';
       out.appliedKeys.push('engine');
     } else if (proto === 'cockroachdb:' || proto === 'cockroach:') {
       out.engine = 'cockroachdb';
@@ -107,7 +109,7 @@ export function parseConnectionUrl(url: string): ParsedConnection {
       out.engine = 'mssql';
       out.appliedKeys.push('engine');
     }
-    const isPgFamily = out.engine === 'postgres' || out.engine === 'cockroachdb' || out.engine === 'yugabytedb';
+    const isPgFamily = out.engine === 'postgres' || out.engine === 'neon' || out.engine === 'cockroachdb' || out.engine === 'yugabytedb';
     if (parsed.hostname) { out.host = parsed.hostname; out.appliedKeys.push('host'); }
     const port = Number(parsed.port);
     if (Number.isFinite(port) && port > 0) {

@@ -39,14 +39,14 @@ impl EngineFamily {
 /// its wire-protocol family. Comparison is ASCII-case-insensitive.
 ///
 /// Known engines per family:
-/// - **Postgres**: `postgres`, `postgresql`, `cockroachdb`, `yugabytedb`
+/// - **Postgres**: `postgres`, `postgresql`, `neon`, `cockroachdb`, `yugabytedb`
 /// - **MySQL**:    `mysql`, `mariadb`, `tidb`, `planetscale`
 /// - **SQLite**:   `sqlite`, `cloudflare-d1`, `d1`
 /// - **DuckDB**:   `duckdb`
 /// - **SQL Server**: `mssql`, `sqlserver`, `azuresql`
 pub fn engine_family(engine: &str) -> EngineFamily {
     match engine.to_lowercase().as_str() {
-        "postgres" | "postgresql" | "cockroachdb" | "yugabytedb" => EngineFamily::Postgres,
+        "postgres" | "postgresql" | "neon" | "cockroachdb" | "yugabytedb" => EngineFamily::Postgres,
         "mysql" | "mariadb" | "tidb" | "planetscale" => EngineFamily::Mysql,
         "duckdb" => EngineFamily::Duckdb,
         "mssql" | "sqlserver" | "azuresql" => EngineFamily::Mssql,
@@ -79,7 +79,7 @@ pub fn is_mssql(engine: &str) -> bool {
 /// File/REST engines (sqlite, cloudflare-d1) return `None`.
 pub fn default_port(engine: &str) -> Option<u16> {
     match engine.to_lowercase().as_str() {
-        "postgres" | "postgresql" => Some(5432),
+        "postgres" | "postgresql" | "neon" => Some(5432),
         "cockroachdb" => Some(26257),
         "yugabytedb" => Some(5433),
         "mysql" | "mariadb" | "planetscale" => Some(3306),

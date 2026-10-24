@@ -4,6 +4,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { EditionBadge } from '../common/EditionBadge';
 import { SyncSection } from './SyncSection';
+import { CLOUD_SYNC_ENABLED } from '../../core/config/edition';
 import { Toggle } from './Toggle';
 
 /**
@@ -214,10 +215,12 @@ export const AccountSettingsTab: React.FC = () => {
           <p className="text-[10px] text-slate-600 mt-1.5">Enter this code on the new device. Expires in 10 minutes, single-use.</p>
         </div>
 
-        <div>
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-600 mb-2">Sync</div>
-          <SyncSection />
-        </div>
+        {CLOUD_SYNC_ENABLED && (
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-600 mb-2">Sync</div>
+            <SyncSection />
+          </div>
+        )}
 
         {analyticsToggle}
       </div>
@@ -230,7 +233,7 @@ export const AccountSettingsTab: React.FC = () => {
         <UserCircle className="w-4 h-4 text-blue-400" />
         Account
       </h3>
-      <p>Sign in to sync connections and settings across your devices.</p>
+      <p>{CLOUD_SYNC_ENABLED ? 'Sign in to sync connections and settings across your devices.' : 'Sign in to your rdSQL account.'}</p>
 
       {status === 'signing-in' ? (
         <div className="flex items-center gap-2">

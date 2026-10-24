@@ -49,6 +49,7 @@ export function getTableCapabilities(engine: string): TableCapabilities {
   const e = normalizeEngine(engine);
   switch (e) {
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -123,6 +124,7 @@ export function truncateTableSql(engine: string, table: string, schema?: string)
   const qt = qualifiedTable(engine, table, schema);
   switch (e) {
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -182,6 +184,7 @@ export function resetAutoIncrementSql(
   const qt = qualifiedTable(engine, table, meta?.sequenceName ? undefined : undefined);
   switch (e) {
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb': {
@@ -219,6 +222,7 @@ export function analyzeTableSql(engine: string, table: string, schema?: string):
   const qt = qualifiedTable(engine, table, schema);
   switch (e) {
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':
@@ -243,6 +247,7 @@ export function vacuumTableSql(engine: string, table: string, schema?: string): 
   const e = normalizeEngine(engine);
   switch (e) {
     case 'postgres':
+    case 'neon':
     case 'postgresql':
     case 'cockroachdb':
     case 'yugabytedb':

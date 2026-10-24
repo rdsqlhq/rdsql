@@ -67,7 +67,7 @@ import { dropEventSql, pgCronUnscheduleSql } from '../../core/sql/eventActions';
 import { fetchExtensions, ExtensionItem } from '../../core/sql/extensionIntrospection';
 import { ManageExtensionsModal } from '../connection/ManageExtensionsModal';
 import type { ObjectKind } from '../../core/domain/types';
-import { isPostgresFamily, isMysqlFamily, isSqliteFamily, isMongoEngine, isRedisEngine } from '../../core/connection/engines';
+import { isPostgresFamily, isPostgresServer, isMysqlFamily, isSqliteFamily, isMongoEngine, isRedisEngine } from '../../core/connection/engines';
 import { CreateDatabaseModal } from '../backup/CreateDatabaseModal';
 import { BackupModal } from '../backup/BackupModal';
 import { RestoreModal } from '../backup/RestoreModal';
@@ -86,6 +86,7 @@ import { useStorageStore } from '../../store/useStorageStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useAuthStore } from '../../store/useAuthStore';
 import { useSyncStore } from '../../store/useSyncStore';
+import { CLOUD_SYNC_ENABLED } from '../../core/config/edition';
 import { DatabaseConnection, SchemaGroupNode, SchemaTableNode, SchemaColumnNode, ConnectionTag } from '../../core/domain/types';
 import type { RedisDbInfo } from '../../core/redis/types';
 import type { S3ConnectionConfig } from '../../core/storage/domain/types';
@@ -1475,8 +1476,7 @@ export const Explorer: React.FC = () => {
           );
         }
       } else if (
-        String(engine) === 'postgres' ||
-        String(engine) === 'postgresql' ||
+        isPostgresServer(String(engine)) ||
         String(engine) === 'sqlite' ||
         String(engine) === 'cloudflare-d1' ||
         String(engine) === 'd1'
@@ -2745,7 +2745,7 @@ export const Explorer: React.FC = () => {
           rendered when cloud sync is actually usable (build has it
           configured and the user is signed in) — otherwise there's nothing
           useful for this footer to show, so it just doesn't render. */}
-      {cloudConfigured && authStatus === 'signed-in' && (
+      {CLOUD_SYNC_ENABLED && cloudConfigured && authStatus === 'signed-in' && (
         <div className="p-2 border-t border-[#1e293b] flex items-center gap-1.5 bg-[#06090e]">
           <button
             onClick={() => void syncNow()}
@@ -3805,7 +3805,7 @@ export const Explorer: React.FC = () => {
             <span>Database Health</span>
           </button>
 
-          {(connContextMenu.conn.engine === 'mysql' || connContextMenu.conn.engine === 'postgres' || connContextMenu.conn.engine === 'mssql') && (
+          {(connContextMenu.conn.engine === 'mysql' || isPostgresServer(connContextMenu.conn.engine) || connContextMenu.conn.engine === 'mssql') && (
             <button
               onClick={() => {
                 setActiveConnection(connContextMenu.conn.id);

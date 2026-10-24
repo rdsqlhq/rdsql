@@ -35,6 +35,18 @@ fn quote_mssql_ident(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
 }
 
+/// A column's full type as it is declared, e.g. `nvarchar(190)`,
+/// `decimal(12,2)`, `datetime2(6)`. INFORMATION_SCHEMA's DATA_TYPE alone is
+/// the bare name, and a bare `nvarchar` in a CREATE TABLE means nvarchar(1).
+const FULL_TYPE_SQL: &str = "CASE \
+    WHEN c.DATA_TYPE IN ('varchar', 'nvarchar', 'char', 'nchar', 'varbinary', 'binary') \
+        THEN c.DATA_TYPE + '(' + CASE WHEN c.CHARACTER_MAXIMUM_LENGTH = -1 THEN 'max' ELSE CAST(c.CHARACTER_MAXIMUM_LENGTH AS varchar(10)) END + ')' \
+    WHEN c.DATA_TYPE IN ('decimal', 'numeric') \
+        THEN c.DATA_TYPE + '(' + CAST(c.NUMERIC_PRECISION AS varchar(10)) + ',' + CAST(c.NUMERIC_SCALE AS varchar(10)) + ')' \
+    WHEN c.DATA_TYPE IN ('datetime2', 'datetimeoffset', 'time') \
+        THEN c.DATA_TYPE + '(' + CAST(c.DATETIME_PRECISION AS varchar(10)) + ')' \
+    ELSE c.DATA_TYPE END";
+
 /// Build a `tiberius::Config` from the connection form and open a TCP + TDS
 /// session. Encryption defaults to required-with-trusted-cert (self-signed
 /// certs are the common case for local/dev SQL Server); `sslMode: "disable"`
@@ -273,14 +285,14 @@ pub async fn fetch_mssql_schema(config: &ConnectionConfig) -> Result<Vec<SchemaN
             .collect();
 
         let col_query = format!(
-            "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, \
+            "SELECT c.TABLE_SCHEMA, c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, {}, \
                     c.IS_NULLABLE, c.COLUMN_DEFAULT \
              FROM INFORMATION_SCHEMA.COLUMNS c \
              JOIN INFORMATION_SCHEMA.TABLES t \
                ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
              WHERE 1 = 1 {} \
              ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION",
-            schema_filter
+            FULL_TYPE_SQL, schema_filter
         );
 
         let col_rows = client
@@ -325,6 +337,12 @@ pub async fn fetch_mssql_schema(config: &ConnectionConfig) -> Result<Vec<SchemaN
                 is_foreign_key: Some(false),
                 is_nullable: Some(is_nullable.eq_ignore_ascii_case("YES")),
                 has_default: Some(col_default.is_some() || is_identity),
+                // The whole clause, as for MySQL (see SchemaNode::column_default).
+                column_default: if is_identity {
+                    Some("IDENTITY(1,1)".to_string())
+                } else {
+                    col_default.map(|d| format!("DEFAULT {}", d))
+                },
                 children: vec![],
             });
         }
@@ -349,6 +367,7 @@ pub async fn fetch_mssql_schema(config: &ConnectionConfig) -> Result<Vec<SchemaN
                     is_foreign_key: None,
                     is_nullable: None,
                     has_default: None,
+                    column_default: None,
                     children: meta.cols,
                 });
             }
@@ -364,6 +383,7 @@ pub async fn fetch_mssql_schema(config: &ConnectionConfig) -> Result<Vec<SchemaN
             is_foreign_key: None,
             is_nullable: None,
             has_default: None,
+            column_default: None,
             children: table_nodes,
         });
     }
@@ -391,7 +411,7 @@ fn mssql_cell_to_json(data: &ColumnData<'static>) -> serde_json::Value {
         CD::U8(v) => v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null),
         CD::I16(v) => v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null),
         CD::I32(v) => v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null),
-        CD::I64(v) => v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null),
+        CD::I64(v) => v.map(|n| super::query::int_json(n as i128)).unwrap_or(serde_json::Value::Null),
         CD::F32(v) => v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null),
         CD::F64(v) => v.map(|n| json!(n)).unwrap_or(serde_json::Value::Null),
         CD::Bit(v) => v.map(|b| json!(b)).unwrap_or(serde_json::Value::Null),
@@ -445,6 +465,14 @@ pub async fn connect_session(config: &ConnectionConfig) -> Result<MssqlClient, S
     connect(config).await
 }
 
+/// Statements whose effect must outlive the statement itself: session
+/// settings, database switches, transactions and #temp tables. `upper` is
+/// the statement, upper-cased with leading whitespace removed.
+fn changes_session_state(upper: &str) -> bool {
+    ["SET ", "USE ", "BEGIN TRAN", "COMMIT", "ROLLBACK", "SAVE TRAN"].iter().any(|p| upper.starts_with(p))
+        || upper.starts_with("CREATE TABLE #")
+}
+
 /// Runs one statement on an already-open client (see `run_duckdb_on`).
 pub async fn run_mssql_on(client: &mut MssqlClient, sql: &str) -> Result<QueryResult, String> {
     let start = Instant::now();
@@ -492,6 +520,25 @@ pub async fn run_mssql_on(client: &mut MssqlClient, sql: &str) -> Result<QueryRe
             execution_time_ms: elapsed,
             affected_rows: count,
             status_message: "Query executed successfully".to_string(),
+        })
+    } else if changes_session_state(&upper) {
+        // `execute` runs the text through sp_executesql, and SQL Server
+        // undoes a SET/USE (and drops a #temp table) when that call returns,
+        // so they never reached the next statement on this session.
+        // A plain SQL batch keeps them.
+        client
+            .simple_query(sql)
+            .await
+            .map_err(|e| from_tiberius(e, Some(sql)).to_json_string())?
+            .into_results()
+            .await
+            .map_err(|e| from_tiberius(e, Some(sql)).to_json_string())?;
+        Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            execution_time_ms: start.elapsed().as_millis() as u64,
+            affected_rows: 0,
+            status_message: "OK".to_string(),
         })
     } else {
         let result = client

@@ -49,6 +49,15 @@ describe('parseEnvOrUrl', () => {
     expect(out.sslMode).toBeUndefined();
   });
 
+  it('recognizes a Neon URL as the Neon engine', () => {
+    const out = parseEnvOrUrl('postgresql://owner:pw@ep-example-123456-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require');
+    expect(out.engine).toBe('neon');
+    expect(out.port).toBe(5432);
+    expect(out.database).toBe('neondb');
+    expect(out.sslMode).toBe('require');
+    expect(parseEnvOrUrl('postgres://u:p@db.example.com/app').engine).toBe('postgres');
+  });
+
   it('picks up SSL mode from URL query params', () => {
     expect(parseConnectionUrl('postgres://u:p@h/db?sslmode=Require').sslMode).toBe('require');
     expect(parseConnectionUrl('postgres://u:p@h/db?ssl=true').sslMode).toBe('require');

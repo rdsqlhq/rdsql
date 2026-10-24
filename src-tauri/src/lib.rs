@@ -237,12 +237,21 @@ pub fn run() {
             let report_bug = MenuItemBuilder::with_id("report_bug", "Report Bug...")
                 .build(app)?;
 
+            let star_github = MenuItemBuilder::with_id("star_github", "Star rdSQL on GitHub...")
+                .build(app)?;
+
+            let sponsor = MenuItemBuilder::with_id("sponsor", "Sponsor rdSQL...")
+                .build(app)?;
+
             let help_menu = SubmenuBuilder::new(app, "Help")
                 .item(&about_item)
                 .separator()
                 .item(&check_updates)
                 .separator()
                 .item(&report_bug)
+                .separator()
+                .item(&star_github)
+                .item(&sponsor)
                 .build()?;
 
             // Build App Menu (macOS app menu)
@@ -350,6 +359,14 @@ pub fn run() {
                     let _ = app
                         .opener()
                         .open_url("https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml", None::<&str>);
+                }
+                "star_github" => {
+                    use tauri_plugin_opener::OpenerExt;
+                    let _ = app.opener().open_url("https://github.com/rdsqlhq/rdsql", None::<&str>);
+                }
+                "sponsor" => {
+                    use tauri_plugin_opener::OpenerExt;
+                    let _ = app.opener().open_url("https://github.com/sponsors/rdsqlhq", None::<&str>);
                 }
                 "quit" => {
                     app.exit(0);

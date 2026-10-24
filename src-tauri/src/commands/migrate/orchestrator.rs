@@ -130,8 +130,12 @@ pub struct MigrationProgress {
     pub phase: String,
 }
 
+/// Where progress events go: the app window in `db_migrate_run`, a plain
+/// closure in tests (see `commands::e2e_bridge`).
+pub(crate) type ProgressSink<'a> = &'a (dyn Fn(MigrationProgress) + Send + Sync);
+
 fn emit_progress(
-    app: &AppHandle,
+    progress: ProgressSink<'_>,
     migration_id: &str,
     schema: &Option<String>,
     table: &str,
@@ -139,17 +143,14 @@ fn emit_progress(
     rows_total: Option<u64>,
     phase: &str,
 ) {
-    let _ = app.emit(
-        "migration_progress",
-        &MigrationProgress {
-            migration_id: migration_id.to_string(),
-            schema: schema.clone(),
-            table: table.to_string(),
-            rows_done,
-            rows_total,
-            phase: phase.to_string(),
-        },
-    );
+    progress(MigrationProgress {
+        migration_id: migration_id.to_string(),
+        schema: schema.clone(),
+        table: table.to_string(),
+        rows_done,
+        rows_total,
+        phase: phase.to_string(),
+    });
 }
 
 fn require_supported_source(config: &ConnectionConfig) -> Result<EngineFamily, String> {
@@ -299,11 +300,38 @@ pub async fn db_migrate_run(
     app: AppHandle,
     registry: State<'_, MigrationRegistry>,
 ) -> Result<MigrationRunSummary, String> {
-    let source_fam = require_supported_source(&source)?;
-    let target_fam = require_supported_target(&target)?;
+    let token = CancellationToken::new();
+    {
+        let mut map = registry.0.lock().await;
+        map.insert(migration_id.clone(), token.clone());
+    }
+    let progress = move |p: MigrationProgress| {
+        let _ = app.emit("migration_progress", &p);
+    };
+    let result = run_migration(&migration_id, &source, &target, &tables, &confirm_token, &token, &progress).await;
+    {
+        let mut map = registry.0.lock().await;
+        map.remove(&migration_id);
+    }
+    result
+}
+
+/// The body of `db_migrate_run`, without the window and the cancel
+/// registry, so tests can run a migration directly.
+pub(crate) async fn run_migration(
+    migration_id: &str,
+    source: &ConnectionConfig,
+    target: &ConnectionConfig,
+    tables: &[TableRunInput],
+    confirm_token: &str,
+    token: &CancellationToken,
+    progress: ProgressSink<'_>,
+) -> Result<MigrationRunSummary, String> {
+    let source_fam = require_supported_source(source)?;
+    let target_fam = require_supported_target(target)?;
     require_cross_engine(source_fam, target_fam)?;
 
-    let expected = expected_confirm_token(&target);
+    let expected = expected_confirm_token(target);
     if !expected.eq_ignore_ascii_case(confirm_token.trim()) {
         return Err(DbError::app(format!(
             "Confirmation token does not match the target database name (\"{}\"). Migration aborted — nothing was written.",
@@ -312,37 +340,31 @@ pub async fn db_migrate_run(
         .to_json_string());
     }
 
-    let token = CancellationToken::new();
-    {
-        let mut map = registry.0.lock().await;
-        map.insert(migration_id.clone(), token.clone());
-    }
-
     let start = Instant::now();
     let mut results = Vec::new();
     let mut total_rows: u64 = 0;
     let mut cancelled = false;
 
-    for t in &tables {
+    for t in tables {
         if token.is_cancelled() {
             cancelled = true;
             break;
         }
         let table_start = Instant::now();
-        emit_progress(&app, &migration_id, &t.schema, &t.table, 0, None, "creating");
+        emit_progress(progress, migration_id, &t.schema, &t.table, 0, None, "creating");
 
         let outcome = match (source_fam, target_fam) {
-            (EngineFamily::Mysql, EngineFamily::Postgres) => run_mysql_to_postgres(&source, &target, t, &app, &migration_id, &token).await,
-            (EngineFamily::Postgres, EngineFamily::Mysql) => run_postgres_to_mysql(&source, &target, t, &app, &migration_id, &token).await,
-            (EngineFamily::Mssql, EngineFamily::Postgres) => run_mssql_to_postgres(&source, &target, t, &app, &migration_id, &token).await,
-            (EngineFamily::Mssql, EngineFamily::Mysql) => run_mssql_to_mysql(&source, &target, t, &app, &migration_id, &token).await,
+            (EngineFamily::Mysql, EngineFamily::Postgres) => run_mysql_to_postgres(source, target, t, progress, migration_id, token).await,
+            (EngineFamily::Postgres, EngineFamily::Mysql) => run_postgres_to_mysql(source, target, t, progress, migration_id, token).await,
+            (EngineFamily::Mssql, EngineFamily::Postgres) => run_mssql_to_postgres(source, target, t, progress, migration_id, token).await,
+            (EngineFamily::Mssql, EngineFamily::Mysql) => run_mssql_to_mysql(source, target, t, progress, migration_id, token).await,
             _ => Err("Unsupported source/target combination.".to_string()),
         };
 
         match outcome {
             Ok((rows, warnings)) => {
                 total_rows += rows;
-                emit_progress(&app, &migration_id, &t.schema, &t.table, rows, Some(rows), "done");
+                emit_progress(progress, migration_id, &t.schema, &t.table, rows, Some(rows), "done");
                 results.push(TableRunResult {
                     schema: t.schema.clone(),
                     table: t.table.clone(),
@@ -353,7 +375,7 @@ pub async fn db_migrate_run(
                 });
             }
             Err(e) => {
-                emit_progress(&app, &migration_id, &t.schema, &t.table, 0, None, "error");
+                emit_progress(progress, migration_id, &t.schema, &t.table, 0, None, "error");
                 // One bad table doesn't block the rest — mirrors
                 // apply_schema_sync's per-statement error collection.
                 results.push(TableRunResult {
@@ -366,11 +388,6 @@ pub async fn db_migrate_run(
                 });
             }
         }
-    }
-
-    {
-        let mut map = registry.0.lock().await;
-        map.remove(&migration_id);
     }
 
     Ok(MigrationRunSummary { tables: results, total_rows, duration_ms: start.elapsed().as_millis() as u64, cancelled })
@@ -400,7 +417,7 @@ async fn run_mysql_to_postgres(
     source: &ConnectionConfig,
     target: &ConnectionConfig,
     t: &TableRunInput,
-    app: &AppHandle,
+    progress: ProgressSink<'_>,
     migration_id: &str,
     token: &CancellationToken,
 ) -> Result<(u64, Vec<String>), String> {
@@ -481,7 +498,7 @@ async fn run_mysql_to_postgres(
             }
         }
         if rows_done % PROGRESS_EVERY == 0 {
-            emit_progress(app, migration_id, &t.schema, &t.table, rows_done, None, "copying");
+            emit_progress(progress, migration_id, &t.schema, &t.table, rows_done, None, "copying");
         }
     }
 
@@ -507,7 +524,7 @@ async fn run_mysql_to_postgres(
 
     sink.close().await.map_err(|e| from_postgres(e, Some(&copy_sql)).to_json_string())?;
 
-    emit_progress(app, migration_id, &t.schema, &t.table, rows_done, Some(rows_done), "finalizing");
+    emit_progress(progress, migration_id, &t.schema, &t.table, rows_done, Some(rows_done), "finalizing");
     for stmt in target_postgres::build_post_load_sql(None, &t.table, &columns) {
         if let Err(e) = pg_client.execute(&stmt, &[]).await {
             warnings.push(format!("Post-load step failed (data is intact): {} — {}", stmt, from_postgres(e, Some(&stmt)).message));
@@ -527,7 +544,7 @@ async fn run_mssql_to_postgres(
     source: &ConnectionConfig,
     target: &ConnectionConfig,
     t: &TableRunInput,
-    app: &AppHandle,
+    progress: ProgressSink<'_>,
     migration_id: &str,
     token: &CancellationToken,
 ) -> Result<(u64, Vec<String>), String> {
@@ -604,7 +621,7 @@ async fn run_mssql_to_postgres(
             }
         }
         if rows_done % PROGRESS_EVERY == 0 {
-            emit_progress(app, migration_id, &t.schema, &t.table, rows_done, None, "copying");
+            emit_progress(progress, migration_id, &t.schema, &t.table, rows_done, None, "copying");
         }
     }
 
@@ -623,7 +640,7 @@ async fn run_mssql_to_postgres(
 
     sink.close().await.map_err(|e| from_postgres(e, Some(&copy_sql)).to_json_string())?;
 
-    emit_progress(app, migration_id, &t.schema, &t.table, rows_done, Some(rows_done), "finalizing");
+    emit_progress(progress, migration_id, &t.schema, &t.table, rows_done, Some(rows_done), "finalizing");
     for stmt in target_postgres::build_post_load_sql(None, &t.table, &columns) {
         if let Err(e) = pg_client.execute(&stmt, &[]).await {
             warnings.push(format!("Post-load step failed (data is intact): {} — {}", stmt, from_postgres(e, Some(&stmt)).message));
@@ -643,7 +660,7 @@ async fn run_postgres_to_mysql(
     source: &ConnectionConfig,
     target: &ConnectionConfig,
     t: &TableRunInput,
-    app: &AppHandle,
+    progress: ProgressSink<'_>,
     migration_id: &str,
     token: &CancellationToken,
 ) -> Result<(u64, Vec<String>), String> {
@@ -667,7 +684,7 @@ async fn run_postgres_to_mysql(
     }
     let col_names: Vec<String> = load_cols.iter().map(|c| c.name.clone()).collect();
 
-    let select_sql = source_postgres::select_sql(&tref, &col_names);
+    let select_sql = source_postgres::select_sql(&tref, &load_cols);
     let (pg_client, pg_task) = source_postgres::connect(source).await?;
     let rows = pg_client.query(&select_sql, &[]).await.map_err(|e| from_postgres(e, Some(&select_sql)).to_json_string())?;
     drop(pg_client);
@@ -708,7 +725,7 @@ async fn run_postgres_to_mysql(
             batch.clear();
         }
         if rows_done % PROGRESS_EVERY == 0 {
-            emit_progress(app, migration_id, &t.schema, &t.table, rows_done, None, "copying");
+            emit_progress(progress, migration_id, &t.schema, &t.table, rows_done, None, "copying");
         }
     }
 
@@ -743,7 +760,7 @@ async fn run_mssql_to_mysql(
     source: &ConnectionConfig,
     target: &ConnectionConfig,
     t: &TableRunInput,
-    app: &AppHandle,
+    progress: ProgressSink<'_>,
     migration_id: &str,
     token: &CancellationToken,
 ) -> Result<(u64, Vec<String>), String> {
@@ -814,7 +831,7 @@ async fn run_mssql_to_mysql(
             batch.clear();
         }
         if rows_done % PROGRESS_EVERY == 0 {
-            emit_progress(app, migration_id, &t.schema, &t.table, rows_done, None, "copying");
+            emit_progress(progress, migration_id, &t.schema, &t.table, rows_done, None, "copying");
         }
     }
 

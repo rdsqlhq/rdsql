@@ -205,10 +205,22 @@ pub async fn fetch_row_estimate(config: &ConnectionConfig, t: &TableRef) -> Opti
 
 /// Build a `SELECT` that casts every column to `::text` (see module doc),
 /// aliased back to its original name for the row-conversion pass.
-pub fn select_sql(t: &TableRef, columns: &[String]) -> String {
+///
+/// Zoned values are first made zone-less, since the targets have no
+/// timezone-aware type and reject Postgres' `+00` suffix: `timestamptz` is
+/// converted to UTC and `timetz` keeps its local time.
+pub fn select_sql(t: &TableRef, columns: &[&CanonicalColumn]) -> String {
     let cols = columns
         .iter()
-        .map(|c| format!("{}::text AS {}", quote_ident(c), quote_ident(c)))
+        .map(|c| {
+            let ident = quote_ident(&c.name);
+            let expr = match c.native_type.as_str() {
+                "timestamptz" => format!("({} AT TIME ZONE 'UTC')::text", ident),
+                "timetz" => format!("{}::time::text", ident),
+                _ => format!("{}::text", ident),
+            };
+            format!("{} AS {}", expr, ident)
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!("SELECT {} FROM {}", cols, table_ident(t.schema.as_deref(), &t.table))

@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   SiPostgresql, SiMysql, SiMariadbfoundation, SiSqlite, SiTurso, SiCloudflare,
-  SiCockroachlabs, SiTidb, SiPlanetscale, SiDuckdb,
+  SiCockroachlabs, SiTidb, SiPlanetscale, SiDuckdb, SiNeon,
 } from 'react-icons/si';
 import { DiMsqlServer, DiRedis, DiMongodb } from 'react-icons/di';
 
@@ -17,6 +17,7 @@ const ICONS: Record<
 > = {
   postgres: { Icon: SiPostgresql, color: '#5A9FD4', scale: 1 },
   postgresql: { Icon: SiPostgresql, color: '#5A9FD4', scale: 1 },
+  neon: { Icon: SiNeon, color: '#00E599', scale: 1 },
   cockroachdb: { Icon: SiCockroachlabs, color: '#6933FF', scale: 1 },
   // No official react-icon yet — fall back to the Postgres elephant (same wire family).
   yugabytedb: { Icon: SiPostgresql, color: '#2D2D2D', scale: 1 },

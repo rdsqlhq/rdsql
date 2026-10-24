@@ -17,6 +17,17 @@ pub fn quote_ident(name: &str) -> String {
     format!("[{}]", name.replace(']', "]]"))
 }
 
+/// The T-SQL schema and table a `TableRef` names. For a SQL Server source,
+/// `TableRef::schema` is the *database* (see `connect`), and the table is
+/// shown as `schema.table` when its schema isn't `dbo` (see
+/// `commands::mssql::fetch_mssql_schema`).
+pub fn schema_and_table(t: &TableRef) -> (String, String) {
+    match t.table.split_once('.') {
+        Some((schema, table)) => (schema.to_string(), table.to_string()),
+        None => ("dbo".to_string(), t.table.clone()),
+    }
+}
+
 pub fn table_ident(schema: Option<&str>, table: &str) -> String {
     match schema {
         Some(s) if !s.is_empty() => format!("{}.{}", quote_ident(s), quote_ident(table)),
@@ -121,20 +132,20 @@ fn map_native_type(
 
 pub async fn fetch_columns(config: &ConnectionConfig, t: &TableRef) -> Result<Vec<CanonicalColumn>, String> {
     let mut client = connect(config, t.schema.as_deref()).await?;
-    let schema = t.schema.clone();
+    let (schema, table) = schema_and_table(t);
 
     let col_sql = format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, \
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, CAST(c.CHARACTER_MAXIMUM_LENGTH AS INT), CAST(c.NUMERIC_PRECISION AS INT), CAST(c.NUMERIC_SCALE AS INT), \
                 c.IS_NULLABLE, \
                 COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity') AS is_identity, \
                 (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc \
                  JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME AND tc.TABLE_SCHEMA = ku.TABLE_SCHEMA \
                  WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY' AND ku.TABLE_SCHEMA = c.TABLE_SCHEMA AND ku.TABLE_NAME = c.TABLE_NAME AND ku.COLUMN_NAME = c.COLUMN_NAME) AS is_pk \
          FROM INFORMATION_SCHEMA.COLUMNS c \
-         WHERE c.TABLE_NAME = '{}' AND c.TABLE_SCHEMA = COALESCE('{}', 'dbo') \
+         WHERE c.TABLE_NAME = '{}' AND c.TABLE_SCHEMA = '{}' \
          ORDER BY c.ORDINAL_POSITION",
-        t.table.replace('\'', "''"),
-        schema.clone().unwrap_or_default().replace('\'', "''"),
+        table.replace('\'', "''"),
+        schema.replace('\'', "''"),
     );
 
     let rows = client
@@ -149,12 +160,15 @@ pub async fn fetch_columns(config: &ConnectionConfig, t: &TableRef) -> Result<Ve
     for row in &rows {
         let name = row.get::<&str, _>(0).unwrap_or("").to_string();
         let data_type = row.get::<&str, _>(1).unwrap_or("").to_string();
-        let char_max_len: Option<i32> = row.get(2);
-        let numeric_precision: Option<i32> = row.get::<i16, _>(3).map(|n| n as i32);
-        let numeric_scale: Option<i32> = row.get::<i16, _>(4).map(|n| n as i32);
+        // All three are cast to INT in the query (NUMERIC_PRECISION is a
+        // tinyint); try_get so an unexpected type can't panic the command,
+        // which would leave the wizard waiting forever.
+        let char_max_len: Option<i32> = row.try_get(2).ok().flatten();
+        let numeric_precision: Option<i32> = row.try_get(3).ok().flatten();
+        let numeric_scale: Option<i32> = row.try_get(4).ok().flatten();
         let is_nullable = row.get::<&str, _>(5).unwrap_or("YES");
-        let is_identity: Option<i32> = row.get(6);
-        let is_pk: i32 = row.get(7).unwrap_or(0);
+        let is_identity: Option<i32> = row.try_get(6).ok().flatten();
+        let is_pk: i32 = row.try_get(7).ok().flatten().unwrap_or(0);
 
         let (ty, warning) = map_native_type(&name, &data_type, char_max_len, numeric_precision, numeric_scale);
         out.push(CanonicalColumn {
@@ -172,14 +186,14 @@ pub async fn fetch_columns(config: &ConnectionConfig, t: &TableRef) -> Result<Ve
 
 pub async fn fetch_row_estimate(config: &ConnectionConfig, t: &TableRef) -> Option<u64> {
     let mut client = connect(config, t.schema.as_deref()).await.ok()?;
-    let schema = t.schema.clone().unwrap_or_else(|| "dbo".to_string());
+    let (schema, table) = schema_and_table(t);
     let sql = format!(
         "SELECT SUM(ps.row_count) FROM sys.tables tbl \
          JOIN sys.schemas sch ON sch.schema_id = tbl.schema_id \
          JOIN sys.dm_db_partition_stats ps ON ps.object_id = tbl.object_id AND ps.index_id IN (0, 1) \
          WHERE sch.name = '{}' AND tbl.name = '{}'",
         schema.replace('\'', "''"),
-        t.table.replace('\'', "''"),
+        table.replace('\'', "''"),
     );
     let rows = client.simple_query(sql).await.ok()?.into_first_result().await.ok()?;
     let count: i64 = rows.first()?.get(0)?;
@@ -190,7 +204,8 @@ pub async fn fetch_row_estimate(config: &ConnectionConfig, t: &TableRef) -> Opti
 /// table's rows for migration — no parameters, straightforward projection.
 pub fn select_sql(t: &TableRef, columns: &[String]) -> String {
     let cols = columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
-    format!("SELECT {} FROM {}", cols, table_ident(t.schema.as_deref(), &t.table))
+    let (schema, table) = schema_and_table(t);
+    format!("SELECT {} FROM {}", cols, table_ident(Some(&schema), &table))
 }
 
 fn int_or_bool(n: i64, ty: &CanonicalType) -> CanonicalValue {
