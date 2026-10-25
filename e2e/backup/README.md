@@ -69,7 +69,8 @@ After each backup the test compares a per-table fingerprint (row count plus a
 hash of every row) of source and copy. On Postgres, MySQL and MariaDB it then
 inserts a row into the copy to check that defaults, AUTO_INCREMENT /
 serial / identity sequences and enum types came across, and that views were
-not copied.
+not copied. On Postgres it also compares every index and constraint (plain,
+partial and expression indexes, UNIQUE, CHECK, foreign keys) by definition.
 
 ## Memory
 

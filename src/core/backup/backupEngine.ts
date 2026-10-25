@@ -1,5 +1,14 @@
 import type { DatabaseEngine, SchemaTableNode, QueryColumn } from '../domain/types';
-import { generateCreateTableSql, generateInsertStatements, createPgEnumSql, isPgSequenceColumn, pgSequenceResetSql } from './backupSql';
+import {
+  generateCreateTableSql,
+  generateInsertStatements,
+  createPgEnumSql,
+  isPgSequenceColumn,
+  pgSequenceResetSql,
+  pgSecondarySql,
+  type PgSecondaryObject,
+} from './backupSql';
+import { quoteIdent } from '../sql/ident';
 import { qualifiedTable } from '../sql/ident';
 import { sortTablesByDependency } from './dependencyGraph';
 import { isMysqlFamily, isDuckdbFamily } from '../connection/engines';
@@ -196,8 +205,11 @@ export function buildBackupPlan(params: {
   /** Postgres enum types in the source schema (see `pgEnumTypesSql`). The
    *  ones the selected tables use are created before the tables. */
   pgEnums?: { name: string; labels: string[] }[];
+  /** Postgres indexes and constraints of the source tables (see
+   *  PG_CONSTRAINTS_SQL / PG_INDEXES_SQL), recreated after the data. */
+  pgSecondary?: PgSecondaryObject[];
 }): BackupExecutionPlan {
-  const { engine, tables, selections, schema, writeMode, targetSchema, pgEnums = [] } = params;
+  const { engine, tables, selections, schema, writeMode, targetSchema, pgEnums = [], pgSecondary = [] } = params;
   const capabilities = getEngineCapabilities(engine);
 
   // Sort tables by FK dependency (parents first). Falls back to original order
@@ -300,9 +312,27 @@ export function buildBackupPlan(params: {
   }
 
   // ── Phase 3: Secondary objects ────────────────────────────────────────
-  // Reserved for future: indexes, constraints, triggers, views.
-  // Currently no generators produce these — the phase exists so adding them
-  // later is additive (insert items here), not structural.
+  // Postgres indexes and UNIQUE / CHECK / EXCLUDE constraints, then foreign
+  // keys — after the data, as pg_dump does: loading is faster without the
+  // indexes, and foreign keys can't trip over the order tables were filled
+  // in. A foreign key is kept only when the table it references is copied
+  // too. The definitions name tables without a schema, so with a target
+  // schema the session's search_path points there first.
+  const copied = new Set(structureTables.map((t) => t.name));
+  const secondary = pgSecondary.filter(
+    (o) => copied.has(o.table) && (o.kind !== 'foreign_key' || copied.has(o.references))
+  );
+  if (secondary.length > 0 && applySchema) {
+    items.unshift({
+      id: 'search_path',
+      table: '',
+      phase: 'schema',
+      sql: `SET search_path TO ${quoteIdent(engine, applySchema)}, public;`,
+    });
+  }
+  for (const o of [...secondary.filter((o) => o.kind !== 'foreign_key'), ...secondary.filter((o) => o.kind === 'foreign_key')]) {
+    items.push({ id: `${o.kind}_${o.table}_${o.name}`, table: o.table, phase: 'secondary', sql: pgSecondarySql(o) });
+  }
 
   // ── Phase 4: Finalize (sequence reset, FK re-enable) ──────────────────
   // Restored rows carry their own ids; move each serial/identity sequence

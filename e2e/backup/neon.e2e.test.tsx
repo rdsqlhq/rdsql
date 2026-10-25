@@ -15,7 +15,7 @@ import path from 'node:path';
 import { parseConnectionUrl } from '../../src/core/connection/envImport';
 import type { DatabaseConnection } from '../../src/core/domain/types';
 import { stopBridge } from './bridge';
-import { conn, fingerprint, query, runBackup, runRestore, servers, type RunResult } from './helpers';
+import { conn, fingerprint, pgSecondaryObjects, query, runBackup, runRestore, servers, type RunResult } from './helpers';
 
 const url = process.env.E2E_NEON_URL;
 const SCRATCH = 'rdsql_e2e_neon';
@@ -68,6 +68,7 @@ describe.runIf(!!url)('postgres → neon', () => {
     const target = neon(SCRATCH);
     expectClean(await runBackup({ source, group: 'public', target, targetGroup: 'public' }));
     expect(await fingerprint(target, 'public')).toEqual(await fingerprint(source, 'public'));
+    expect(await pgSecondaryObjects(target, 'public')).toEqual(await pgSecondaryObjects(source, 'public'));
     const c = await query(target, `INSERT INTO customers (email, "fullName") VALUES ('new@example.com', 'New') RETURNING id`);
     expect(c.rows[0][0]).toBe(20001);
   });
@@ -96,5 +97,6 @@ describe.runIf(!!url)('postgres → neon', () => {
     const target = neon(SCRATCH);
     expectClean(await runRestore({ target, file }));
     expect(await fingerprint(target, 'public')).toEqual(await fingerprint(source, 'public'));
+    expect(await pgSecondaryObjects(target, 'public')).toEqual(await pgSecondaryObjects(source, 'public'));
   });
 });

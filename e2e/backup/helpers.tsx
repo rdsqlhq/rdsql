@@ -242,3 +242,18 @@ export async function runMigration(opts: { source: DatabaseConnection; group: st
     unmount();
   }
 }
+
+/** Postgres: every index and non-primary-key constraint of a schema, by
+ *  table, name and definition — equal for two databases exactly when they
+ *  have the same ones. NOT NULL is left out: Postgres 18 lists it as a
+ *  constraint (contype 'n'), older versions don't. */
+export async function pgSecondaryObjects(c: DatabaseConnection, schema: string): Promise<string[]> {
+  const cons = await query(
+    c,
+    `SELECT cl.relname || ' ' || co.conname || ' ' || pg_get_constraintdef(co.oid)
+     FROM pg_constraint co JOIN pg_class cl ON cl.oid = co.conrelid JOIN pg_namespace n ON n.oid = cl.relnamespace
+     WHERE n.nspname = '${schema}' AND co.contype NOT IN ('p', 'n') ORDER BY 1`
+  );
+  const idx = await query(c, `SELECT tablename || ' ' || indexname || ' ' || replace(indexdef, '${schema}.', '') FROM pg_indexes WHERE schemaname = '${schema}' ORDER BY 1`);
+  return [...cons.rows.map((r) => String(r[0])), ...idx.rows.map((r) => String(r[0]))];
+}

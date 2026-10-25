@@ -170,6 +170,16 @@ SELECT
   CASE WHEN g % 3 = 0 THEN NULL ELSE g % 2 = 0 END
 FROM generate_series(1, 10000) g;
 
+-- Secondary objects a backup has to recreate: plain, partial, expression
+-- and multi-column indexes, a CHECK constraint, and a UNIQUE constraint on
+-- top of the ones (and the foreign keys) declared with the tables.
+CREATE INDEX orders_customer_idx ON orders (customer_id);
+CREATE INDEX orders_open_idx ON orders (placed_at) WHERE status = 'pending';
+CREATE INDEX customers_email_lower_idx ON customers (lower(email));
+CREATE INDEX order_items_product_qty_idx ON order_items (product_id, qty DESC);
+ALTER TABLE products ADD CONSTRAINT products_price_positive CHECK (price > 0);
+ALTER TABLE events ADD CONSTRAINT events_kind_at_key UNIQUE (kind, at);
+
 -- Views are not backed up (only base tables); this one checks that.
 CREATE VIEW order_totals AS
 SELECT order_id, sum(qty * unit_price) AS total FROM order_items GROUP BY order_id;

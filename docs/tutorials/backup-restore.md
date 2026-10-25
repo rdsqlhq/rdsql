@@ -32,8 +32,16 @@ database. Restore also takes scripts made by `pg_dump` and `mysqldump` /
 
 A copy keeps tables, every row, primary keys, column defaults, auto-increment /
 serial / identity counters (moved past the copied ids) and PostgreSQL enum
-types. Views, other indexes, unique constraints and foreign keys are not
-copied.
+types.
+
+From PostgreSQL (and Neon) it also keeps every index, UNIQUE, CHECK and
+EXCLUDE constraint and foreign key, created after the rows are in, the way
+`pg_dump` orders them. A foreign key is copied when the table it points to is
+copied too. Rows are written as `COPY` blocks (to a file) or sent with the
+COPY protocol (to a connection), which is much faster than INSERT statements,
+especially to a cloud database. For other engines, indexes other than the
+primary key, unique constraints and foreign keys are not copied yet. Views
+are never copied.
 
 ## Restore
 
