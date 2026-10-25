@@ -45,21 +45,59 @@ const BEGIN_TXN = new Set(['TRANSACTION', 'TRAN', 'WORK', 'DISTRIBUTED']);
  * comments are dropped, and so are statements that are only comments.
  */
 export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic'): string[] {
-  const statements: string[] = [];
+  return scanSql(sql, dialect, { final: true }).items.map((item) => item.text);
+}
+
+export interface ScanOptions {
+  /** True when `sql` is the rest of the input. Otherwise a statement still
+   *  open at the end is left unconsumed, for the caller to retry once more
+   *  text has arrived. */
+  final: boolean;
+  /** Statement delimiter in effect at the start (after `DELIMITER $$`). */
+  delimiter?: string;
+  /** Postgres: report psql meta-command lines (`\connect`, `\restrict` …) as
+   *  `skipped` items instead of folding them into the next statement. */
+  psqlMeta?: boolean;
+  /** Postgres: return right after a `COPY ... FROM stdin` statement, whose
+   *  data rows follow it in the input (see StatementScanner). */
+  stopAtCopy?: boolean;
+}
+
+export interface ScanResult {
+  items: { kind: 'statement' | 'skipped'; text: string }[];
+  /** How much of `sql` the items cover; the rest belongs to the next scan. */
+  consumed: number;
+  delimiter: string;
+  /** Set when the scan stopped at a `COPY ... FROM stdin` statement. */
+  copy?: string;
+}
+
+/** The splitter behind `splitSqlStatements`, usable on a script that
+ *  arrives in pieces (see StatementScanner in core/backup/restoreStream). */
+export function scanSql(sql: string, dialect: SqlDialect, options: ScanOptions): ScanResult {
+  const items: ScanResult['items'] = [];
   const n = sql.length;
+  const { final } = options;
   let current = '';
-  let delimiter = ';';
+  let delimiter = options.delimiter ?? ';';
   let routine = false;
   let depth = 0;
   let wordsSeen = 0;
+  /** Where the statement being read began: everything before is consumed. */
+  let stmtStart = 0;
+  /** Set when the input ends inside a statement and more is coming. */
+  let incomplete = false;
+  let copy: string | undefined;
 
-  const flush = (text: string) => {
+  const flush = (text: string, end: number) => {
     const cleaned = stripLeadingComments(text, dialect).trim();
-    if (cleaned && cleaned !== delimiter) statements.push(cleaned);
+    if (cleaned && cleaned !== delimiter) items.push({ kind: 'statement', text: cleaned });
     current = '';
     routine = false;
     depth = 0;
     wordsSeen = 0;
+    stmtStart = end;
+    if (options.stopAtCopy && dialect === 'postgres' && /^COPY\b[\s\S]*\bFROM\s+STDIN\b/i.test(cleaned)) copy = cleaned;
   };
 
   const atLineStart = (i: number) => {
@@ -81,31 +119,62 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
     // Client-side commands that only make sense at the start of a line.
     if ((ch === 'D' || ch === 'd') && dialect === 'mysql' && atLineStart(i) && /^DELIMITER\s/i.test(sql.slice(i, i + 10))) {
       const end = lineEnd(i);
+      if (end === n && !final) {
+        incomplete = true;
+        break;
+      }
       const token = sql.slice(i + 9, end).trim();
-      flush(current);
+      flush(current, i);
       if (token) delimiter = token;
       i = end;
+      stmtStart = end;
       continue;
     }
     if ((ch === 'G' || ch === 'g') && dialect === 'mssql' && atLineStart(i)) {
       const end = lineEnd(i);
+      if (end === n && !final) {
+        incomplete = true;
+        break;
+      }
       if (/^GO(\s+\d+)?\s*$/i.test(sql.slice(i, end))) {
-        flush(current);
+        flush(current, end);
         i = end;
         continue;
       }
     }
+    // psql meta-commands: a line of their own, starting with a backslash.
+    if (ch === '\\' && options.psqlMeta && dialect === 'postgres' && atLineStart(i) && !stripLeadingComments(current, dialect).trim()) {
+      const end = lineEnd(i);
+      if (end === n && !final) {
+        incomplete = true;
+        break;
+      }
+      items.push({ kind: 'skipped', text: sql.slice(i, end).trim() });
+      // Only comments came before it on this statement; drop them with it.
+      current = '';
+      i = end;
+      stmtStart = end;
+      continue;
+    }
 
     // Custom delimiter (after `DELIMITER $$`): split on it verbatim.
     if (delimiter !== ';' && sql.startsWith(delimiter, i)) {
-      flush(current);
+      flush(current, i + delimiter.length);
       i += delimiter.length;
       continue;
+    }
+    if (!final && delimiter.length > 1 && n - i < delimiter.length && delimiter.startsWith(sql.slice(i))) {
+      incomplete = true;
+      break;
     }
 
     // Line comments.
     if ((ch === '-' && next === '-') || (ch === '#' && dialect === 'mysql')) {
       const end = lineEnd(i);
+      if (end === n && !final) {
+        incomplete = true;
+        break;
+      }
       current += sql.slice(i, end);
       i = end;
       continue;
@@ -114,6 +183,10 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
     // Block comments. MySQL's /*! ... */ runs as code, so it isn't skipped.
     if (ch === '/' && next === '*' && !(dialect === 'mysql' && sql[i + 2] === '!')) {
       const close = sql.indexOf('*/', i + 2);
+      if (close === -1 && !final) {
+        incomplete = true;
+        break;
+      }
       const end = close === -1 ? n : close + 2;
       current += sql.slice(i, end);
       i = end;
@@ -144,6 +217,10 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
         }
         j++;
       }
+      if (j >= n && !final) {
+        incomplete = true;
+        break;
+      }
       const end = Math.min(j + 1, n);
       current += sql.slice(i, end);
       i = end;
@@ -156,6 +233,10 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
       if (tagMatch) {
         const tag = tagMatch[0];
         const close = sql.indexOf(tag, i + tag.length);
+        if (close === -1 && !final) {
+          incomplete = true;
+          break;
+        }
         const end = close === -1 ? n : close + tag.length;
         current += sql.slice(i, end);
         i = end;
@@ -167,6 +248,11 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
     if (/[A-Za-z_]/.test(ch) && !(i > 0 && (IDENT_CHAR.test(sql[i - 1]) || sql[i - 1] === '.'))) {
       let j = i + 1;
       while (j < n && IDENT_CHAR.test(sql[j]) && !(delimiter !== ';' && sql.startsWith(delimiter, j))) j++;
+      // The word may go on in the next piece.
+      if (j === n && !final) {
+        incomplete = true;
+        break;
+      }
       const word = sql.slice(i, j).toUpperCase();
       current += sql.slice(i, j);
       i = j;
@@ -185,8 +271,9 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
     }
 
     if (ch === ';' && delimiter === ';' && depth === 0) {
-      flush(current + ch);
+      flush(current + ch, i + 1);
       i++;
+      if (copy) break;
       continue;
     }
 
@@ -194,8 +281,12 @@ export function splitSqlStatements(sql: string, dialect: SqlDialect = 'generic')
     i++;
   }
 
-  flush(current);
-  return statements;
+  if (copy) return { items, consumed: stmtStart, delimiter, copy };
+  if (final && !incomplete) {
+    flush(current, n);
+    return { items, consumed: n, delimiter };
+  }
+  return { items, consumed: stmtStart, delimiter };
 }
 
 function nextWord(sql: string, from: number): string {

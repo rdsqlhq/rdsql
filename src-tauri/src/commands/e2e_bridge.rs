@@ -56,6 +56,19 @@ fn e2e_bridge() {
                     let sql = a["sql"].as_str().unwrap_or("").trim().to_string();
                     Ok(serde_json::to_value(s.run(&sql, None).await?.0).unwrap())
                 }
+                "session_copy_in" => {
+                    let sid = a["sessionId"].as_str().unwrap_or("");
+                    let s = sessions.get_mut(sid).ok_or("The database session has ended.")?;
+                    let n = s.copy_in(a["sql"].as_str().unwrap_or("").trim(), a["data"].as_str().unwrap_or("")).await?;
+                    Ok(serde_json::json!(n))
+                }
+                "file_size" => Ok(serde_json::json!(super::files::file_size(a["path"].as_str().unwrap_or("").to_string())?)),
+                "file_read_chunk" => Ok(serde_json::to_value(super::files::file_read_chunk(
+                    a["path"].as_str().unwrap_or("").to_string(),
+                    a["offset"].as_u64().unwrap_or(0),
+                    a["maxBytes"].as_u64().unwrap_or(0),
+                )?)
+                .unwrap()),
                 "session_close" => {
                     if let Some(s) = sessions.remove(a["sessionId"].as_str().unwrap_or("")) { s.close().await; }
                     Ok(serde_json::Value::Null)

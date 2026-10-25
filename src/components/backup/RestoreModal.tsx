@@ -1,13 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs';
+import { remove, writeTextFile } from '@tauri-apps/plugin-fs';
 import { X, HardDriveUpload, Loader2, CheckCircle2, AlertTriangle, FileText, FolderOpen, Cloud, Copy, Check } from 'lucide-react';
 import { DatabaseConnection } from '../../core/domain/types';
 import { useEscapeToClose } from '../../core/hooks/useEscapeToClose';
 import { safeInvoke } from '../../core/tauri/ipc';
-import { splitSqlStatements, stripSchemaQualifiers } from '../../core/backup/backupSql';
+import { stripSchemaQualifiers } from '../../core/backup/backupSql';
 import { sqlDialectFor } from '../../core/sql/splitStatements';
-import { buildRestorePlan, type RestorePlanItem, type RestoreStatementCategory } from '../../core/backup/restorePlanner';
+import { isMysqlFamily } from '../../core/connection/engines';
+import { categorizeStatement } from '../../core/backup/restorePlanner';
+import { getEngineCapabilities } from '../../core/backup/backupEngine';
+import {
+  StatementScanner,
+  detectDumpKind,
+  skipReason,
+  restoreBinaryLiterals,
+  hasRawBytes,
+  DUMP_LABEL,
+  type DumpKind,
+  type RestoreItem,
+} from '../../core/backup/restoreStream';
 import { describeFsError } from '../../core/utils/fsErrors';
 import { copyToClipboard } from '../../core/utils/clipboard';
 import { tempDir } from '../../core/utils/tempDir';
@@ -27,12 +39,48 @@ interface RestoreModalProps {
 
 type LogKind = 'info' | 'success' | 'error';
 
+/** The file being restored. It is never loaded whole: the run reads it in
+ *  CHUNK_BYTES pieces (`file_read_chunk`), so its size doesn't matter. */
+interface RestoreSource {
+  path: string;
+  /** What to show for it: the local path, or bucket/key for S3. */
+  label: string;
+  size: number;
+  kind: DumpKind;
+  /** A downloaded copy to delete when the modal closes. */
+  temp?: boolean;
+}
+
+interface FileChunk {
+  text: string;
+  bytes: number;
+  eof: boolean;
+}
+
+const CHUNK_BYTES = 4 * 1024 * 1024;
+/** How much of the file is read up front to recognize its format. */
+const HEAD_BYTES = 64 * 1024;
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** Statements whose effect lasts for the session (SET, PRAGMA, FK checks,
+ *  pg_dump's set_config). When a paused restore resumes on a new session,
+ *  these are re-run from the part already done. */
+function isSessionSetting(statement: string, engine: DatabaseConnection['engine']): boolean {
+  if (/^SELECT\s+pg_catalog\.set_config\s*\(/i.test(statement)) return true;
+  const cat = categorizeStatement(statement, getEngineCapabilities(engine));
+  return cat === 'fk_disable' || cat === 'pragma_set';
+}
+
 export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose }) => {
   const [running, setRunning] = useState(false);
   useEscapeToClose(running ? null : onClose);
-  const [filePath, setFilePath] = useState<string | null>(null);
-  const [rawContent, setRawContent] = useState<string>('');
-  const [statements, setStatements] = useState<string[]>([]);
+  const [source, setSource] = useState<RestoreSource | null>(null);
   const [stopOnError, setStopOnError] = useState(true);
   /** When true (default), any `` `db`.`table` ``/`"schema"."table"` qualifier
    *  baked into the file is stripped before execution, so every statement
@@ -40,14 +88,16 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
    *  instead of failing with e.g. MySQL's "Unknown database 'tc_superadmin'"
    *  when the file's source database name doesn't exist on this server. */
   const [stripSourceDb, setStripSourceDb] = useState(true);
+  /** Skip OWNER TO / GRANT / REVOKE: they name roles from the source server,
+   *  which usually don't exist here. */
+  const [skipOwnership, setSkipOwnership] = useState(true);
   const [done, setDone] = useState(false);
   const [hadError, setHadError] = useState(false);
   /** True when a run stopped on error mid-way but is resumable — see
    *  `pauseHere` in handleRestore. Distinct from `done`. */
   const [paused, setPaused] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [totalPlanned, setTotalPlanned] = useState(0);
-  const [currentPhase, setCurrentPhase] = useState<string>('');
+  const [bytesDone, setBytesDone] = useState(0);
+  const [counts, setCounts] = useState({ statements: 0, rows: 0 });
   const [log, setLog] = useState<{ text: string; kind: LogKind }[]>([]);
   const [copiedLog, setCopiedLog] = useState(false);
   const [logFilePath, setLogFilePath] = useState<string | null>(null);
@@ -60,13 +110,15 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
   /** Mirrors `log` state synchronously so `persistLog` (called mid-flight)
    *  always has the full history, not whatever last flushed to state. */
   const logLinesRef = useRef<{ text: string; kind: LogKind }[]>([]);
-  /** Set by `pauseHere` to a closure that re-enters the plan at the
-   *  statement that failed. Lives only as long as this modal instance. */
+  /** Set by `pauseHere` to a closure that continues the run at the item
+   *  that failed. Lives only as long as this modal instance. */
   const resumeRef = useRef<(() => Promise<void>) | null>(null);
   /** One backend session for the whole restore, so session settings such as
    *  `SET FOREIGN_KEY_CHECKS = 0` apply to every statement after them. Kept
    *  open while paused so Resume continues on the same connection. */
   const sessionRef = useRef<string | null>(null);
+  const sourceRef = useRef<RestoreSource | null>(null);
+  sourceRef.current = source;
 
   const closeSession = async () => {
     const id = sessionRef.current;
@@ -74,7 +126,17 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     if (id) await safeInvoke('session_close', { sessionId: id }).catch(() => {});
   };
 
-  useEffect(() => () => { void closeSession(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const dropTempFile = (s: RestoreSource | null) => {
+    if (s?.temp) void remove(s.path).catch(() => {});
+  };
+
+  useEffect(
+    () => () => {
+      void closeSession();
+      dropTempFile(sourceRef.current);
+    },
+    [] // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const appendLog = (text: string, kind: LogKind = 'info') => {
     logLinesRef.current = [...logLinesRef.current, { text, kind }];
@@ -101,6 +163,23 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     setTimeout(() => setCopiedLog(false), 2000);
   };
 
+  /** Reads just the start of the file to tell what kind of script it is. */
+  const loadSource = async (path: string, label: string, temp = false) => {
+    const size = await safeInvoke<number>('file_size', { path });
+    const head = await safeInvoke<FileChunk>('file_read_chunk', { path, offset: 0, maxBytes: HEAD_BYTES });
+    dropTempFile(source);
+    const kind = detectDumpKind(head.text);
+    setSource({ path, label, size, kind, temp });
+    setLog([]);
+    logLinesRef.current = [];
+    setDone(false);
+    setPaused(false);
+    setBytesDone(0);
+    setCounts({ statements: 0, rows: 0 });
+    resumeRef.current = null;
+    if (!head.text.trim()) setPickError('That file is empty.');
+  };
+
   const handlePickFile = async () => {
     setPickError(null);
     let path: string | null = null;
@@ -113,25 +192,14 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
       return;
     }
     try {
-      const content = await readTextFile(path);
-      const stmts = splitSqlStatements(content, sqlDialectFor(connection.engine));
-      setRawContent(content);
-      setFilePath(path);
-      setStatements(stmts);
-      setLog([]);
-      setDone(false);
-      setProgress(0);
-      if (stmts.length === 0) {
-        setPickError('No SQL statements found in that file.');
-      }
+      await loadSource(path, path);
     } catch (readErr: any) {
-      setPickError(describeFsError(readErr, 'read'));
+      setPickError(readErr?.message || describeFsError(readErr, 'read'));
     }
   };
 
-  /** Load a backup from S3-compatible storage: download to a temp file, read it
-   *  (gunzip if needed), and feed the existing restore pipeline. No second
-   *  restore engine — the SQL content is treated identically to a local file. */
+  /** Load a backup from S3-compatible storage: download it to a temp file
+   *  (gunzipped if needed), then restore from that file like a local one. */
   const handlePickFromStorage = async (obj: StorageObject) => {
     setPickError(null);
     setStorageBusy(true);
@@ -151,35 +219,21 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     }
     try {
       const decrypted = await withDecryptedSecret(conn);
-      const tmpPath = `/tmp/rdsql_restore_${Date.now()}_${obj.name}`;
+      const tmpPath = `${await tempDir()}/rdsql_restore_${Date.now()}_${obj.name}`;
       await safeInvoke('s3_download_object', {
         config: decrypted,
         key: obj.key,
         localPath: tmpPath,
         transferId: `restore_${Date.now()}`,
       });
-      let content: string;
+      let localPath = tmpPath;
       if (/\.gz$/i.test(obj.key)) {
         // Gunzip via the Rust streaming helper into a sibling .sql temp file.
-        const gunzipped = `${tmpPath}.sql`;
-        await safeInvoke('s3_gzip_decompress', { localIn: tmpPath, localOut: gunzipped });
-        content = await readTextFile(gunzipped);
-        await remove(gunzipped).catch(() => {});
-      } else {
-        content = await readTextFile(tmpPath);
+        localPath = `${tmpPath}.sql`;
+        await safeInvoke('s3_gzip_decompress', { localIn: tmpPath, localOut: localPath });
+        await remove(tmpPath).catch(() => {});
       }
-      await remove(tmpPath).catch(() => {});
-
-      const stmts = splitSqlStatements(content, sqlDialectFor(connection.engine));
-      setRawContent(content);
-      setFilePath(`${conn.bucket}/${obj.key}`);
-      setStatements(stmts);
-      setLog([]);
-      setDone(false);
-      setProgress(0);
-      if (stmts.length === 0) {
-        setPickError('No SQL statements found in that backup object.');
-      }
+      await loadSource(localPath, `${conn.bucket}/${obj.key}`, true);
     } catch (err: any) {
       setPickError(err?.message || String(err));
     } finally {
@@ -187,21 +241,9 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     }
   };
 
-  const phaseLabel = (cat: RestoreStatementCategory): string => {
-    switch (cat) {
-      case 'fk_disable': return 'Disabling FK checks';
-      case 'fk_enable': return 'Re-enabling FK checks';
-      case 'ddl_drop': return 'Dropping objects';
-      case 'ddl_create': return 'Creating schema';
-      case 'ddl_alter': return 'Altering schema';
-      case 'dml': return 'Importing data';
-      case 'pragma_set': return 'Session settings';
-      default: return 'Executing';
-    }
-  };
-
   const handleRestore = async () => {
-    if (statements.length === 0) return;
+    if (!source) return;
+    const src = source;
     setRunning(true);
     setDone(false);
     setPaused(false);
@@ -209,109 +251,169 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     setLog([]);
     logLinesRef.current = [];
     setLogFilePath(null);
-    setProgress(0);
+    setBytesDone(0);
     resumeRef.current = null;
 
-    // If enabled, drop the file's baked-in database/schema qualifier from
-    // every CREATE/INSERT/DROP/ALTER before parsing, so the file replays
-    // against whatever database THIS connection is pointed at rather than
-    // requiring a same-named database to exist on the target server.
-    const effectiveSql = stripSourceDb ? stripSchemaQualifiers(connection.engine, rawContent) : rawContent;
-    if (stripSourceDb) appendLog('Ignoring the database name baked into the file — restoring into this connection\'s current database.');
+    const engine = connection.engine;
+    const dialect = sqlDialectFor(engine);
+    // pg_dump names every object with its schema and empties search_path, so
+    // stripping qualifiers would leave its statements nowhere to go.
+    const strip = stripSourceDb && src.kind !== 'pg_dump';
+    const rules = { ownership: skipOwnership, use: strip };
+    appendLog(`Restoring ${DUMP_LABEL[src.kind]} (${formatBytes(src.size)}) into "${connection.name}".`);
+    if (strip) appendLog("Ignoring the database name baked into the file — restoring into this connection's current database.");
 
-    // Build categorized execution plan — re-orders statements into safe phases
-    // (fk-off → drops → creates → data → alters → unknown → fk-on). Built once
-    // per fresh run; `runPlan` (below) re-enters this SAME plan on resume, so
-    // a pause never re-categorizes or re-orders statements mid-flight.
-    const plan = buildRestorePlan(effectiveSql, connection.engine);
-    setTotalPlanned(plan.totalStatements);
-    appendLog(`Plan: ${plan.ddlCount} DDL, ${plan.dmlCount} DML, ${plan.totalStatements} total statements`);
-
+    const tally = { statements: 0, rows: 0 };
+    const skippedKinds = new Map<string, number>();
     const errorBox = { any: false };
+    let lastLogged = 0;
 
-    /** Pause on the statement that failed. Resuming retries that SAME
-     *  statement (not the next one) — the assumption is the user fixes
-     *  whatever caused it (a conflicting table, a permissions issue, disk
-     *  space) and wants the failed statement re-attempted, not skipped. */
-    const pauseHere = async (atIndex: number) => {
-      resumeRef.current = () => runPlan(atIndex);
+    const execute = (sql: string, n: number) =>
+      safeInvoke('session_execute', {
+        sessionId: sessionRef.current,
+        sql,
+        queryId: `restore_${n}_${Date.now()}`,
+        __meta: { source: 'restore' },
+      });
+
+    /** Pause on the item that failed. Resume retries that SAME item — the
+     *  user fixes whatever caused it (a conflicting table, a permissions
+     *  issue, disk space) and wants it re-attempted, not skipped. */
+    const pauseHere = async (itemsDone: number) => {
+      resumeRef.current = () => run(itemsDone);
       appendLog('Paused. Fix the issue, then click Resume to retry this statement and continue.', 'error');
-      setProgress(atIndex);
       setHadError(true);
       setPaused(true);
-      setCurrentPhase('');
+      setCounts({ ...tally });
       await persistLog();
       setRunning(false);
     };
 
-    const execute = (sql: string, i: number) =>
-      safeInvoke('session_execute', {
-        sessionId: sessionRef.current,
-        sql,
-        queryId: `restore_${i}_${Date.now()}`,
-        __meta: { source: 'restore' },
-      });
-
-    /** Opens the session if there is none (first run, or it was dropped while
-     *  paused). A new session re-runs the plan's FK-disable statements first,
-     *  since those only last for the connection they ran on. */
-    const ensureSession = async (fromIndex: number) => {
-      if (sessionRef.current) return;
-      sessionRef.current = await safeInvoke<string>('session_open', { config: connection });
-      if (fromIndex === 0) return;
-      for (const [i, item] of plan.items.entries()) {
-        if (i < fromIndex && item.category === 'fk_disable') await execute(item.statement, i).catch(() => {});
-      }
-    };
-
-    const runPlan = async (fromIndex: number) => {
+    /** Runs the file from the start, skipping the first `resumeAt` items
+     *  (done before a pause). Re-reading instead of remembering an offset
+     *  keeps the scanner's state (DELIMITER, COPY) exact. */
+    const run = async (resumeAt: number) => {
       setRunning(true);
       setPaused(false);
 
+      const newSession = !sessionRef.current;
       try {
-        await ensureSession(fromIndex);
+        if (newSession) sessionRef.current = await safeInvoke<string>('session_open', { config: connection });
       } catch (err: any) {
         errorBox.any = true;
         appendLog(`Could not connect: ${err?.message || String(err)}`, 'error');
-        await pauseHere(fromIndex);
+        await pauseHere(resumeAt);
         return;
       }
 
-      for (let i = fromIndex; i < plan.items.length; i++) {
-        const item = plan.items[i];
-        setCurrentPhase(phaseLabel(item.category));
+      const scanner = new StatementScanner(dialect);
+      let offset = 0;
+      let ordinal = 0;
+      try {
+        for (;;) {
+          const chunk = await safeInvoke<FileChunk>('file_read_chunk', { path: src.path, offset, maxBytes: CHUNK_BYTES });
+          offset += chunk.bytes;
+          const items: RestoreItem[] = scanner.push(chunk.text, chunk.eof);
 
-        const stmt = item.statement;
-        try {
-          await ensureSession(i);
-          await execute(stmt, i);
-          appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: OK`, 'success');
-        } catch (err: any) {
-          const msg = err?.message || String(err);
-          // Turning FK checks off/on is an optimization, not data: Postgres'
-          // `session_replication_role` needs superuser, which managed hosts
-          // (Neon, RDS, Supabase) never grant. The backup already orders
-          // tables parents-first, so carry on without it.
-          if ((item.category === 'fk_disable' || item.category === 'fk_enable') && !/session has ended/i.test(msg)) {
-            appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: skipped — ${msg}. Continuing without it.`);
-            setProgress(i + 1);
-            continue;
+          for (const item of items) {
+            ordinal++;
+            if (ordinal <= resumeAt) {
+              // A new session lost the settings made before the pause.
+              if (newSession && item.kind === 'statement' && isSessionSetting(item.text, engine)) {
+                await execute(item.text, ordinal).catch(() => {});
+              }
+              continue;
+            }
+
+            if (item.kind === 'meta') {
+              skippedKinds.set('psql command', (skippedKinds.get('psql command') ?? 0) + 1);
+              continue;
+            }
+
+            if (item.kind === 'copy') {
+              try {
+                await safeInvoke('session_copy_in', { sessionId: sessionRef.current, sql: item.sql, data: item.data });
+                tally.rows += item.rows;
+              } catch (err: any) {
+                const msg = err?.message || String(err);
+                errorBox.any = true;
+                appendLog(`FAILED — ${msg} — ${item.sql}`, 'error');
+                if (/session has ended|connection/i.test(msg)) await closeSession();
+                if (stopOnError) {
+                  await pauseHere(ordinal - 1);
+                  return;
+                }
+              }
+              continue;
+            }
+
+            const reason = skipReason(item.text, rules);
+            if (reason) {
+              skippedKinds.set(reason, (skippedKinds.get(reason) ?? 0) + 1);
+              continue;
+            }
+            let sql = strip ? stripSchemaQualifiers(engine, item.text) : item.text;
+            // Binary column values that mysqldump wrote as raw bytes.
+            if (isMysqlFamily(engine)) sql = restoreBinaryLiterals(sql);
+            try {
+              if (hasRawBytes(sql)) throw new Error('This statement contains bytes that are not text, which this engine cannot take in a SQL string.');
+              await execute(sql, ordinal);
+              tally.statements++;
+            } catch (err: any) {
+              const msg = err?.message || String(err);
+              const cat = categorizeStatement(sql, getEngineCapabilities(engine));
+              // Turning FK checks off/on is an optimization, not data:
+              // Postgres' `session_replication_role` needs superuser, which
+              // managed hosts (Neon, RDS, Supabase) never grant.
+              if ((cat === 'fk_disable' || cat === 'fk_enable') && !/session has ended/i.test(msg)) {
+                appendLog(`Skipped "${sql.slice(0, 80)}" — ${msg}. Continuing without it.`);
+                continue;
+              }
+              // pg_dump -n public writes CREATE SCHEMA public, which every
+              // new database already has: what it asks for is already true.
+              if (/^CREATE\s+SCHEMA\s/i.test(sql) && /42P06|already exists/i.test(msg)) {
+                appendLog(`Schema already exists, kept as is: ${sql.slice(0, 80)}`);
+                continue;
+              }
+              errorBox.any = true;
+              appendLog(`FAILED — ${msg} — ${sql.slice(0, 300)}`, 'error');
+              // A lost connection ends the session; Resume opens a new one.
+              if (/session has ended|connection/i.test(msg)) await closeSession();
+              if (stopOnError) {
+                await pauseHere(ordinal - 1);
+                return;
+              }
+            }
           }
-          errorBox.any = true;
-          appendLog(`[${i + 1}/${plan.items.length}] ${item.category}: FAILED — ${msg}`, 'error');
-          // A lost connection ends the session; Resume opens a new one.
-          if (/session has ended|connection/i.test(msg)) await closeSession();
-          if (stopOnError) {
-            await pauseHere(i);
-            return;
+
+          setBytesDone(offset);
+          setCounts({ ...tally });
+          // A progress line about every 10% of a large file.
+          if (!chunk.eof && src.size > CHUNK_BYTES && offset - lastLogged >= src.size / 10) {
+            lastLogged = offset;
+            appendLog(`${formatBytes(offset)} of ${formatBytes(src.size)} — ${tally.statements.toLocaleString()} statements, ${tally.rows.toLocaleString()} rows`);
           }
+          if (chunk.eof) break;
         }
-        setProgress(i + 1);
+      } catch (err: any) {
+        // Reading the file failed (moved, unreadable, not UTF-8).
+        errorBox.any = true;
+        appendLog(err?.message || String(err), 'error');
+        await pauseHere(Math.max(resumeAt, ordinal - 1));
+        return;
       }
 
+      if (scanner.rest.trim()) {
+        errorBox.any = true;
+        appendLog(`The file ends inside a statement, which was not run: ${scanner.rest.trim().slice(0, 200)}`, 'error');
+      }
+      for (const [kind, n] of skippedKinds) appendLog(`Skipped ${n.toLocaleString()} ${kind} statement${n === 1 ? '' : 's'}.`);
+      appendLog(`${tally.statements.toLocaleString()} statements run, ${tally.rows.toLocaleString()} rows copied.`);
+
       await closeSession();
+      setCounts({ ...tally });
+      setBytesDone(src.size);
       setHadError(errorBox.any);
-      setCurrentPhase('');
       if (!errorBox.any) appendLog('Restore complete.', 'success');
       await persistLog();
       setRunning(false);
@@ -319,7 +421,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
       resumeRef.current = null;
     };
 
-    await runPlan(0);
+    await run(0);
   };
 
   /** Continue a paused restore, retrying the statement that failed. */
@@ -329,6 +431,9 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
     setHadError(false);
     await resume();
   };
+
+  const percent = source && source.size > 0 ? Math.min(100, (bytesDone / source.size) * 100) : 0;
+  const isPgDump = source?.kind === 'pg_dump';
 
   return (
     <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center" onClick={onClose}>
@@ -358,11 +463,12 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
             </label>
             <button
               onClick={handlePickFile}
-              className="w-full h-9 flex items-center gap-2 px-2 rounded-lg bg-[#0f172a] border border-[#1e293b] hover:border-blue-500/50 text-left transition-colors"
+              disabled={running}
+              className="w-full h-9 flex items-center gap-2 px-2 rounded-lg bg-[#0f172a] border border-[#1e293b] hover:border-blue-500/50 text-left transition-colors disabled:opacity-50"
             >
               <FolderOpen className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-              {filePath ? (
-                <span className="truncate font-mono text-[11px] text-slate-200">{filePath}</span>
+              {source ? (
+                <span className="truncate font-mono text-[11px] text-slate-200">{source.label}</span>
               ) : (
                 <span className="text-slate-500">Choose a .sql file...</span>
               )}
@@ -372,9 +478,9 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
                 <CopyableErrorBanner message={pickError} tone="red" compact />
               </div>
             )}
-            {filePath && statements.length > 0 && (
+            {source && (
               <div className="mt-1 flex items-center gap-1.5 text-[11px] text-slate-400">
-                <FileText className="w-3 h-3" /> {statements.length} statement{statements.length === 1 ? '' : 's'} found
+                <FileText className="w-3 h-3" /> {DUMP_LABEL[source.kind]} · {formatBytes(source.size)}
               </div>
             )}
             {/* Restore from S3-compatible storage (Phase 6). Opens an embedded
@@ -390,7 +496,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
                   setPickError(null);
                   setShowStoragePicker(true);
                 }}
-                disabled={storageBusy}
+                disabled={storageBusy || running}
                 className="h-7 px-2.5 rounded-lg text-[11px] font-medium text-amber-300 bg-amber-600/10 border border-amber-600/30 hover:bg-amber-600/20 flex items-center gap-1.5 disabled:opacity-50"
                 title="Restore a backup from S3-compatible storage"
               >
@@ -415,19 +521,34 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
               />
               Stop on first error
             </label>
-            <label className="flex items-center gap-2 text-[11px] text-slate-300">
+            <label className={`flex items-center gap-2 text-[11px] ${isPgDump ? 'text-slate-500' : 'text-slate-300'}`}>
               <input
                 type="checkbox"
-                checked={stripSourceDb}
+                checked={stripSourceDb && !isPgDump}
+                disabled={isPgDump}
                 onChange={(e) => setStripSourceDb(e.target.checked)}
                 className="accent-blue-500"
               />
               Ignore database name baked into the file
             </label>
             <p className="text-[9px] text-slate-600 pl-5">
-              {stripSourceDb
-                ? "Restores into this connection's current database, even if it's named differently from where the backup came from."
-                : 'Every CREATE/INSERT/DROP will target the exact database name from the file — fails if no database with that name exists here.'}
+              {isPgDump
+                ? 'Not used for pg_dump scripts: they name each object with its schema, which has to stay.'
+                : stripSourceDb
+                  ? "Restores into this connection's current database, even if it's named differently from where the backup came from. USE statements are skipped."
+                  : 'Every CREATE/INSERT/DROP will target the exact database name from the file — fails if no database with that name exists here.'}
+            </p>
+            <label className="flex items-center gap-2 text-[11px] text-slate-300">
+              <input
+                type="checkbox"
+                checked={skipOwnership}
+                onChange={(e) => setSkipOwnership(e.target.checked)}
+                className="accent-blue-500"
+              />
+              Skip ownership and privileges (OWNER TO, GRANT, REVOKE)
+            </label>
+            <p className="text-[9px] text-slate-600 pl-5">
+              They name users from the server the dump came from, which usually don't exist here.
             </p>
           </div>
 
@@ -435,8 +556,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px]">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
               <span>
-                Paused at statement {progress + 1}/{totalPlanned || statements.length} — {currentPhase || 'see log'}
-                . Fix the issue, then click Resume to retry it.
+                Paused after {counts.statements.toLocaleString()} statements. Fix the issue, then click Resume to retry it.
               </span>
             </div>
           )}
@@ -447,17 +567,17 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
                 <div className="flex items-center gap-2 mb-1.5">
                   <Loader2 className="w-3 h-3 animate-spin text-purple-400 shrink-0" />
                   <span className="text-[10px] text-slate-300 font-medium truncate flex-1">
-                    {currentPhase || 'Processing…'}
+                    {counts.statements.toLocaleString()} statements · {counts.rows.toLocaleString()} rows
                   </span>
                   <span className="text-[10px] text-slate-500 font-mono shrink-0">
-                    {totalPlanned > 0 ? `${progress}/${totalPlanned}` : `${progress}/${statements.length}`}
+                    {source ? `${formatBytes(bytesDone)} / ${formatBytes(source.size)}` : ''}
                   </span>
                 </div>
               )}
               <div className="h-1.5 w-full bg-[#1e293b] rounded-full overflow-hidden mb-2">
                 <div
                   className={`h-full transition-all ${hadError ? 'bg-amber-500' : 'bg-purple-500'}`}
-                  style={{ width: (totalPlanned || statements.length) ? `${(progress / (totalPlanned || statements.length)) * 100}%` : '0%' }}
+                  style={{ width: `${percent}%` }}
                 />
               </div>
               <div className="border border-[#1e293b] rounded-lg bg-[#06090e] overflow-hidden">
@@ -532,7 +652,7 @@ export const RestoreModal: React.FC<RestoreModalProps> = ({ connection, onClose 
               !done && (
                 <button
                   onClick={handleRestore}
-                  disabled={running || statements.length === 0}
+                  disabled={running || !source}
                   className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
                 >
                   {running && <Loader2 className="w-3 h-3 animate-spin" />}

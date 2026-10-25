@@ -34,6 +34,26 @@ is then restored through the Restore screen.
 
 Postgres also tests a backup into a schema that doesn't exist yet (Safe mode).
 
+With `E2E_NEON_URL` set to a Neon connection string, `neon.e2e.test.tsx`
+also backs up from the local Postgres source into Neon, and restores both an
+rdSQL backup and a default `pg_dump` (owners and grants kept) into it. It
+works in a scratch database it creates and drops.
+
+**Restoring other tools' dumps** (`dumps.e2e.test.tsx`): a `pg_dump` script
+(made by pg_dump 17 from the 16 source, so it includes `\restrict` lines and
+`COPY` blocks), plus `mysqldump` and `mariadb-dump` scripts made with
+`--databases`, `--routines` and `--triggers`, restored through the Restore
+screen into an empty database and compared row for row. Also checks that
+ownership and grants for missing roles are skipped.
+
+**Data grid types** (`grid-types.e2e.test.tsx`): Postgres types the driver
+only gets in binary (interval, inet, cidr, macaddr, bit, varbit, timetz,
+money, arrays of them) read the way Postgres displays them, on all 10,000
+type-zoo rows.
+
+**Compare & Sync** (`compare.e2e.test.tsx`): the setup card, a schema
+compare, the result, and "New compare".
+
 **Migrate** (`migrate.e2e.test.tsx`): the Migrate Database wizard for
 MySQL → Postgres, Postgres → MySQL, and (when the `mssql` profile is up)
 SQL Server → Postgres and SQL Server → MySQL. Checks row counts per table and
