@@ -13,6 +13,15 @@ All notable changes to rdSQL Desktop are documented here. Format loosely follows
 - Restore reads the file a few megabytes at a time, so dumps of any size can be run.
   Statements run in the file's own order; progress follows the bytes read.
 - Backup & Restore tutorial (`docs/tutorials/backup-restore.md`).
+- PostgreSQL / Neon backups copy every index, UNIQUE / CHECK / EXCLUDE constraint and
+  foreign key, created after the data as pg_dump does (a foreign key when the table it
+  references is copied too). Re-running a backup into the same target skips the ones
+  that already exist.
+
+### Changed
+- PostgreSQL / Neon backups write rows as COPY (a `COPY ... FROM stdin` block per table in
+  a file, the COPY protocol into a connection) instead of INSERT statements. Restoring a
+  ~470k-row backup into Neon went from about 130 s to under 30 s, index builds included.
 
 ### Fixed
 - The data grid showed NULL for PostgreSQL interval, inet, cidr, macaddr, bit, varbit,

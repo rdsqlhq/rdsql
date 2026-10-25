@@ -403,3 +403,86 @@ export function generateInsertStatements(
 }
 
 export { splitSqlStatements } from '../sql/splitStatements';
+
+// ── PostgreSQL: COPY data and secondary objects ──────────────────────────
+
+/** `COPY <table> (<cols>) FROM stdin;` for a backup's rows of `table`. */
+export function pgCopySql(engine: DatabaseEngine | string, tableName: string, columns: string[], schemaName?: string): string {
+  return `COPY ${qualifiedTable(engine, tableName, schemaName)} (${columns.map((c) => quoteIdent(engine, c)).join(', ')}) FROM stdin;`;
+}
+
+/** One row in COPY text format: tab-separated, `\N` for NULL, and backslash,
+ *  newline, carriage return and tab escaped. Values are Postgres' own text
+ *  forms (backup reads columns as ::text), which COPY reads back exactly. */
+export function pgCopyRow(values: unknown[]): string {
+  return values
+    .map((v) => {
+      if (v === null || v === undefined) return '\\N';
+      const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      return s.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+    })
+    .join('\t');
+}
+
+/** A constraint or index of a table, as its source database defines it. */
+export interface PgSecondaryObject {
+  table: string;
+  name: string;
+  kind: 'index' | 'unique' | 'check' | 'exclusion' | 'foreign_key';
+  /** pg_get_constraintdef / pg_get_indexdef, read with the source schema
+   *  first in search_path so names come out unqualified. */
+  definition: string;
+  /** Foreign keys: the table it references (same schema), else ''. */
+  references: string;
+}
+
+/** Constraints other than the primary key, in the current schema (run with
+ *  `SET search_path TO <schema>` first). */
+export const PG_CONSTRAINTS_SQL = `SELECT cl.relname AS table_name, c.conname, c.contype::text,
+       pg_get_constraintdef(c.oid) AS definition,
+       CASE WHEN rf.relnamespace = cl.relnamespace THEN rf.relname ELSE '' END AS references
+FROM pg_constraint c
+JOIN pg_class cl ON cl.oid = c.conrelid
+LEFT JOIN pg_class rf ON rf.oid = c.confrelid
+WHERE cl.relnamespace = to_regnamespace(current_schema())::oid AND c.contype IN ('u', 'c', 'x', 'f')
+ORDER BY cl.relname, c.conname;`;
+
+/** Indexes that don't belong to a primary key, unique or exclusion
+ *  constraint (those come with the constraint). */
+export const PG_INDEXES_SQL = `SELECT t.relname AS table_name, i.relname AS index_name, pg_get_indexdef(x.indexrelid) AS definition
+FROM pg_index x
+JOIN pg_class i ON i.oid = x.indexrelid
+JOIN pg_class t ON t.oid = x.indrelid
+WHERE t.relnamespace = to_regnamespace(current_schema())::oid
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid AND c.contype IN ('p', 'u', 'x') AND c.conrelid = x.indrelid)
+ORDER BY t.relname, i.relname;`;
+
+const CONSTRAINT_KIND: Record<string, PgSecondaryObject['kind']> = { u: 'unique', c: 'check', x: 'exclusion', f: 'foreign_key' };
+
+/** Rows of PG_CONSTRAINTS_SQL and PG_INDEXES_SQL as PgSecondaryObjects. */
+export function pgSecondaryObjects(constraints: unknown[][], indexes: unknown[][]): PgSecondaryObject[] {
+  return [
+    ...constraints.map(([table, name, type, definition, references]) => ({
+      table: String(table),
+      name: String(name),
+      kind: CONSTRAINT_KIND[String(type)] ?? 'check',
+      definition: String(definition),
+      references: String(references ?? ''),
+    })),
+    ...indexes.map(([table, name, definition]) => ({
+      table: String(table),
+      name: String(name),
+      kind: 'index' as const,
+      definition: String(definition),
+      references: '',
+    })),
+  ];
+}
+
+/** The statement that recreates `obj`. Both forms skip an object that
+ *  already exists, so a backup can run again into the same target. */
+export function pgSecondarySql(obj: PgSecondaryObject): string {
+  if (obj.kind === 'index') return obj.definition.replace(/^CREATE (UNIQUE )?INDEX /i, (_m, u) => `CREATE ${u ?? ''}INDEX IF NOT EXISTS `) + ';';
+  const alter = `ALTER TABLE ${quoteIdent('postgres', obj.table)} ADD CONSTRAINT ${quoteIdent('postgres', obj.name)} ${obj.definition}`;
+  return `DO $rdsql$ BEGIN ${alter}; EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $rdsql$;`;
+}

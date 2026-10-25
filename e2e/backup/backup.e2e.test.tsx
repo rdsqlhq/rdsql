@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { stopBridge } from './bridge';
-import { conn, fingerprint, freshDatabase, query, runBackup, runRestore, servers, type RunResult } from './helpers';
+import { conn, fingerprint, freshDatabase, pgSecondaryObjects, query, runBackup, runRestore, servers, type RunResult } from './helpers';
 
 afterAll(() => stopBridge());
 
@@ -40,6 +40,10 @@ describe('postgres 16 → postgres 17', () => {
     const r = await runBackup({ source, group: 'public', target, targetGroup: 'public' });
     expectClean(r);
     expect(await fingerprint(target, 'public')).toEqual(await sourcePrint(source, 'public'));
+    // Indexes (plain, partial, expression), UNIQUE, CHECK and foreign keys.
+    const objects = await pgSecondaryObjects(source, 'public');
+    expect(objects.length).toBeGreaterThanOrEqual(15);
+    expect(await pgSecondaryObjects(target, 'public')).toEqual(objects);
 
     // Defaults, serial/identity sequences and enums came across, so the
     // copy accepts new rows the way the source does.
@@ -71,6 +75,9 @@ describe('postgres 16 → postgres 17', () => {
     const target = conn(servers.pgDst, 'from_file');
     expectClean(await runRestore({ target, file }));
     expect(await fingerprint(target, 'public')).toEqual(await sourcePrint(source, 'public'));
+    expect(await pgSecondaryObjects(target, 'public')).toEqual(await pgSecondaryObjects(source, 'public'));
+    // Rows are written as COPY blocks, like pg_dump.
+    expect(fs.readFileSync(file, 'utf8')).toMatch(/^COPY "order_items" \(.*\) FROM stdin;$/m);
     const c = await query(target, `INSERT INTO customers (email, "fullName") VALUES ('new@example.com', 'New') RETURNING id`);
     expect(c.rows[0][0]).toBe(20001);
   });

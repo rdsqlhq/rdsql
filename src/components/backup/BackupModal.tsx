@@ -25,6 +25,12 @@ import {
   hexColumns as binaryHexColumns,
   mssqlIdentityInsertSql,
   pgEnumTypesSql,
+  pgCopySql,
+  pgCopyRow,
+  pgSecondaryObjects,
+  PG_CONSTRAINTS_SQL,
+  PG_INDEXES_SQL,
+  type PgSecondaryObject,
   pickChunkStrategy,
   selectKeysetChunkSql,
   selectOffsetChunkSql,
@@ -98,6 +104,9 @@ interface DataCursor {
   /** Rows processed so far for THIS table — drives the row-progress bar and
    *  the "first N rows" cap. */
   rowsProcessed: number;
+  /** File output: this table's `COPY ... FROM stdin` line is written and
+   *  its block not yet closed with `\.` (Postgres). */
+  copyOpen?: boolean;
 }
 
 export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, initialGroupName }) => {
@@ -437,6 +446,25 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
       }
     }
 
+    // Postgres: the source's indexes and constraints, read with its schema
+    // first in search_path so their definitions name tables without it.
+    let pgSecondary: PgSecondaryObject[] = [];
+    if (isPostgresServer(connection.engine) && sourceSchema) {
+      let sid: string | null = null;
+      const run = (sql: string) =>
+        safeInvoke<QueryResultData>('session_execute', { sessionId: sid, sql, queryId: `backup_ddl_${Date.now()}` });
+      try {
+        sid = await safeInvoke<string>('session_open', { config: connection });
+        await run(`SET search_path TO ${quoteIdent(connection.engine, sourceSchema)}`);
+        const [cons, idx] = [await run(PG_CONSTRAINTS_SQL), await run(PG_INDEXES_SQL)];
+        pgSecondary = pgSecondaryObjects(cons.rows, idx.rows);
+      } catch (err: any) {
+        appendLog(`Warning: could not read indexes and constraints (${err?.message || err}). They won't be copied.`, 'error');
+      } finally {
+        if (sid) await safeInvoke('session_close', { sessionId: sid }).catch(() => {});
+      }
+    }
+
     const plan = buildBackupPlan({
       engine: connection.engine,
       tables: chosenTables,
@@ -450,6 +478,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
           ? isPg && targetDatabaseName ? targetDatabaseName : null
           : !qualifyWithDbName ? null : undefined,
       pgEnums,
+      pgSecondary,
     });
 
     setTotalTables(plan.totalTables);
@@ -631,6 +660,22 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
       }
     };
 
+    /** Postgres: loads rows into the destination with COPY, many times
+     *  faster than INSERT statements, especially to a remote server. */
+    const copyToTarget = async (sql: string, data: string, label: string): Promise<boolean> => {
+      try {
+        if (!(await ensureTargetSession())) return false;
+        await safeInvoke('session_copy_in', { sessionId: sessionRef.current, sql, data });
+        return true;
+      } catch (err: any) {
+        errorBox.any = true;
+        const msg = describeError(err);
+        if (/session has ended|connection/i.test(msg)) await closeSession();
+        appendLog(`  Failed (${label}): ${msg} — ${sql}`, 'error');
+        return false;
+      }
+    };
+
     // ── Phase 1: Schema (execute CREATE/DROP/TRUNCATE) ───────────────────
     // Schema statements are always executed one-per-call (safe mode) because
     // MySQL doesn't support multi-statement queries without a special flag,
@@ -695,6 +740,19 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     /** Runs the finalize phase (FK re-enable, file save confirmation, S3
      *  upload) — only reached once every table has fully completed. */
     const finalizeRun = async () => {
+      // Indexes and constraints, now that every row is in.
+      const secondaryItems = plan.items.filter((i) => i.phase === 'secondary' && i.sql);
+      if (secondaryItems.length > 0) {
+        setCurrentStep('Creating indexes and constraints…');
+        let created = 0;
+        for (const item of secondaryItems) {
+          if (outputPath) await writeChunk('\n' + item.sql + '\n');
+          if (destination === 'connection' && applyConn) {
+            if (await applyBatch([item.sql], `index/constraint:${item.table}`)) created++;
+          } else created++;
+        }
+        appendLog(`${created} of ${secondaryItems.length} indexes and constraints ${destination === 'connection' ? 'created' : 'written'}.`);
+      }
       // The FK re-enable is handled below, once, on the session it applies to.
       const finalizeItems = plan.items.filter((i) => i.phase === 'finalize' && i.sql && i.id !== 'finalize_fk_enable');
       for (const item of finalizeItems) {
@@ -779,6 +837,10 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
     /** Data phase, resumable. `fromIndex` is which table in `dataItems` to
      *  start at; `resumeCursor` (if given) is where WITHIN that table to
      *  continue from — every earlier table is assumed already fully done. */
+    /** Postgres rows go as COPY (file: a COPY block per table; connection:
+     *  the COPY protocol), the format pg_dump uses. */
+    const useCopy = isPostgresServer(connection.engine);
+
     const runData = async (fromIndex: number, resumeCursor: DataCursor | null) => {
       setRunning(true);
       setPaused(false);
@@ -839,6 +901,39 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
 
           if (res.rows.length === 0) break;
 
+          if (useCopy) {
+            const copySql = pgCopySql(connection.engine, item.table, res.columns.map((c) => c.name), plan.targetSchema);
+            const data = res.rows.map(pgCopyRow).join('\n') + '\n';
+            let ok = true;
+            if (destination === 'connection' && applyConn) {
+              ok = await copyToTarget(copySql, data, `data:${item.table}:${cursor.rowsProcessed}`);
+            } else if (outputPath) {
+              try {
+                await writeChunk((cursor.copyOpen ? '' : copySql + '\n') + data);
+                cursor.copyOpen = true;
+              } catch (err: any) {
+                errorBox.any = true;
+                appendLog(`  Failed writing chunk for "${item.table}": ${describeFsError(err, 'write')}`, 'error');
+                ok = false;
+              }
+            }
+            if (!ok) {
+              if (stopOnError) { await pauseHere(idx, cursor); return; }
+              tableFailed = true;
+              break;
+            }
+            cursor.rowsProcessed += res.rows.length;
+            if (strategy.mode === 'keyset' && strategy.keysetColumn) {
+              const pkIdx = res.columns.findIndex((c) => c.name === strategy.keysetColumn);
+              cursor.lastKeyVal = pkIdx >= 0 ? res.rows[res.rows.length - 1][pkIdx] : cursor.lastKeyVal;
+            } else {
+              cursor.offset += res.rows.length;
+            }
+            setRowProgress({ done: cursor.rowsProcessed, total: typeof table?.row_count === 'number' ? table.row_count : null });
+            if (res.rows.length < chunkLimit) break;
+            continue;
+          }
+
           const stmts =
             destination === 'connection'
               ? generateDataStatements(connection.engine, item.table, plan.targetSchema, res.columns, res.rows, hexColumns)
@@ -875,6 +970,11 @@ export const BackupModal: React.FC<BackupModalProps> = ({ connection, onClose, i
           if (res.rows.length < chunkLimit) break; // short page = last page
         }
 
+        // Close this table's COPY block in the file.
+        if (cursor.copyOpen && outputPath) {
+          await writeChunk('\\.\n\n');
+          cursor.copyOpen = false;
+        }
         if (identityInsert) {
           if (destination === 'connection' && applyConn) await applyBatch([identityInsert.off], `identity_off:${item.table}`);
           else if (outputPath) await writeChunk(identityInsert.off + '\n');
