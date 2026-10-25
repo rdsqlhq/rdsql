@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   X,
   Cloud,
+  Square,
 } from 'lucide-react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, remove } from '@tauri-apps/plugin-fs';
@@ -120,6 +121,8 @@ export interface SchemaCompareViewProps {
   targetLabel: string;
   targetIsProd: boolean;
   onCompare: () => void;
+  /** Cancels a running compare or script generation. */
+  onStop: () => void;
   syncScript: SyncScript | null;
   generatingSync: boolean;
   syncError: string | null;
@@ -146,6 +149,7 @@ export const SchemaCompareView: React.FC<SchemaCompareViewProps> = ({
   targetLabel,
   targetIsProd,
   onCompare,
+  onStop,
   syncScript,
   generatingSync,
   syncError,
@@ -301,7 +305,7 @@ export const SchemaCompareView: React.FC<SchemaCompareViewProps> = ({
     );
   }
 
-  if (comparing) return <ComparingState source={sourceLabel} target={targetLabel} />;
+  if (comparing) return <ComparingState source={sourceLabel} target={targetLabel} onStop={onStop} />;
 
   if (error) {
     return (
@@ -453,6 +457,7 @@ export const SchemaCompareView: React.FC<SchemaCompareViewProps> = ({
         syncScript={syncScript}
         generatingSync={generatingSync}
         onGenerateSync={onGenerateSync}
+        onStop={onStop}
         statementCount={statements.length}
         dropCount={scriptSummary.drop}
         onReviewSql={() => {
@@ -1053,6 +1058,7 @@ const ActionBar: React.FC<{
   onSelectNone: () => void;
   syncScript: SyncScript | null;
   generatingSync: boolean;
+  onStop: () => void;
   onGenerateSync: () => void;
   statementCount: number;
   dropCount: number;
@@ -1070,6 +1076,7 @@ const ActionBar: React.FC<{
   onSelectNone,
   syncScript,
   generatingSync,
+  onStop,
   onGenerateSync,
   statementCount,
   dropCount,
@@ -1179,6 +1186,7 @@ const ActionBar: React.FC<{
                 )}
                 Generate SQL
               </button>
+              {generatingSync && <StopButton onStop={onStop} />}
             </>
           ) : (
             <>
@@ -1190,6 +1198,7 @@ const ActionBar: React.FC<{
                 )}
                 Rebuild
               </button>
+              {generatingSync && <StopButton onStop={onStop} />}
               <button
                 onClick={onReviewSql}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#141e33] border border-cyan-500/30 hover:border-cyan-500/60 text-cyan-300 text-xs font-semibold transition-colors"
@@ -1482,8 +1491,19 @@ const EmptyState: React.FC<{
   </div>
 );
 
+const StopButton: React.FC<{ onStop: () => void }> = ({ onStop }) => (
+  <button
+    onClick={onStop}
+    title="Stop"
+    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-600/15 border border-rose-500/40 hover:bg-rose-600/25 text-rose-300 text-[11px] font-semibold transition-colors"
+  >
+    <Square className="w-3 h-3 fill-current" />
+    Stop
+  </button>
+);
+
 /** Indeterminate — the backend reports no progress, so no fake percentage. */
-const ComparingState: React.FC<{ source: string; target: string }> = ({ source, target }) => (
+const ComparingState: React.FC<{ source: string; target: string; onStop: () => void }> = ({ source, target, onStop }) => (
   <div className="h-full flex flex-col px-4 py-4 gap-3">
     <div className="flex items-center gap-2 text-xs text-slate-300">
       <Loader2 className="w-4 h-4 animate-spin text-cyan-400" />
@@ -1491,6 +1511,9 @@ const ComparingState: React.FC<{ source: string; target: string }> = ({ source, 
       <span className="text-slate-500 font-mono">
         {source} → {target}
       </span>
+      <div className="ml-auto">
+        <StopButton onStop={onStop} />
+      </div>
     </div>
     <div className="text-[11px] text-slate-600">Nothing is written to either database.</div>
     <div className="flex-1 space-y-1.5 min-h-0">

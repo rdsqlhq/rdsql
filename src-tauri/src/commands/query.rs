@@ -119,6 +119,26 @@ pub async fn cancel_query(query_id: String, registry: tauri::State<'_, QueryRegi
     }
 }
 
+/// Runs `fut` so `cancel_query(id)` can stop it: the future is dropped,
+/// which closes its connections. Without an id it just runs. Used by
+/// long-running commands that aren't a single query (Compare & Sync).
+pub(crate) async fn run_cancellable<T>(
+    id: Option<String>,
+    registry: &QueryRegistry,
+    fut: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let Some(id) = id else { return fut.await };
+    let token = CancellationToken::new();
+    registry.lock().await.insert(id.clone(), token.clone());
+    let result = tokio::select! {
+        biased;
+        _ = token.cancelled() => Err(DbError::app(CANCELLED_BY_USER).to_json_string()),
+        res = fut => res,
+    };
+    registry.lock().await.remove(&id);
+    result
+}
+
 #[tauri::command]
 pub async fn execute_query(
     request: QueryRequest,
@@ -973,6 +993,29 @@ async fn close_session(sessions: &SessionRegistry, session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_cancellable_stops_on_cancel() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let registry: QueryRegistry = Default::default();
+            let slow = async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok::<_, String>(())
+            };
+            let reg = registry.clone();
+            let canceller = async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                reg.lock().await.remove("op1").expect("registered while running").cancel();
+            };
+            let (result, _) = tokio::join!(run_cancellable(Some("op1".into()), &registry, slow), canceller);
+            assert!(result.unwrap_err().contains(CANCELLED_BY_USER));
+            assert!(registry.lock().await.is_empty());
+
+            // Without an id it just runs.
+            assert_eq!(run_cancellable(None, &registry, async { Ok::<_, String>(7) }).await, Ok(7));
+        });
+    }
 
     fn sqlite_config(path: &str) -> ConnectionConfig {
         serde_json::from_value(serde_json::json!({

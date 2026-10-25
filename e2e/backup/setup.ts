@@ -27,3 +27,9 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 // safeInvoke only calls invoke() inside Tauri; otherwise it simulates.
 (window as unknown as { __TAURI_INTERNALS__: object }).__TAURI_INTERNALS__ = {};
 Element.prototype.scrollIntoView = () => {};
+// The compare result list measures itself; jsdom has no layout to observe.
+(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};

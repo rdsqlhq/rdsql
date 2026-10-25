@@ -32,6 +32,7 @@ import { PROVIDER_PRESETS, PRESET_BY_ID } from '../../core/ai/providers';
 import { AIError, isAIConfigured, type AIProvider, type ModelInfo } from '../../core/ai/types';
 import { testConnection, fetchModels } from '../../core/ai/client';
 import { confirmAsync } from '../../store/useConfirmStore';
+import { OutboundLink } from '../common/OutboundLink';
 
 type SettingsTab = 'account' | 'query' | 'storage' | 'log' | 'data' | 'security' | 'ai';
 
@@ -521,14 +522,12 @@ const AISettingsTab: React.FC<{
         <div className="flex items-center justify-between mb-1">
           <label className="block text-slate-400">API Token</label>
           {preset.keyUrl && (
-            <a
+            <OutboundLink
               href={preset.keyUrl}
-              target="_blank"
-              rel="noreferrer"
               className="text-[10px] text-cyan-400 hover:underline flex items-center gap-1"
             >
               Get a key <ExternalLink className="w-3 h-3" />
-            </a>
+            </OutboundLink>
           )}
         </div>
         <div className="relative">

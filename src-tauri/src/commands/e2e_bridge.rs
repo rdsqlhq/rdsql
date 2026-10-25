@@ -84,6 +84,11 @@ fn e2e_bridge() {
                     .await?;
                     Ok(serde_json::to_value(summary).unwrap())
                 }
+                "compare_schema" => {
+                    let source: ConnectionConfig = serde_json::from_value(a["source"].clone()).map_err(|e| e.to_string())?;
+                    let target: ConnectionConfig = serde_json::from_value(a["target"].clone()).map_err(|e| e.to_string())?;
+                    Ok(serde_json::to_value(super::compare::compare_schema_impl(source, target).await?).unwrap())
+                }
                 other => Err(format!("bridge: unknown command {}", other)),
             }
         });

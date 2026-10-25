@@ -13,6 +13,7 @@ import { formatBytes, formatDateTime } from './format';
 import { copyToClipboard } from '../../core/utils/clipboard';
 import { CopyableErrorBanner } from '../common/CopyableErrorBanner';
 import type { S3ConnectionConfig, StorageObject } from '../../core/storage/domain/types';
+import { OutboundLink } from '../common/OutboundLink';
 
 interface Props {
   connection: S3ConnectionConfig;
@@ -157,15 +158,13 @@ export const StorageDetailsStrip: React.FC<Props> = ({ connection, object, onPre
               {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
               {copied ? 'Copied' : 'Copy'}
             </button>
-            <a
+            <OutboundLink
               href={presignUrl}
-              target="_blank"
-              rel="noreferrer"
               className="h-6 w-6 flex items-center justify-center rounded text-slate-400 hover:text-amber-400 hover:bg-[#141e33] shrink-0"
               title="Open in browser"
             >
               <ExternalLink className="w-3 h-3" />
-            </a>
+            </OutboundLink>
           </>
         )}
       </div>
