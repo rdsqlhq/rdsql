@@ -25,7 +25,10 @@ pub enum UpdateCheckOutcome {
         /// ISO-8601 publish date of the release, if the endpoint provides one.
         date: Option<String>,
     },
-    /// Already on the newest published build.
+    /// Already on the newest published build. Named explicitly: `rename_all`
+    /// would make it "upToDate", which the frontend (`'up-to-date'`) didn't
+    /// recognize, so being up to date showed as a failed check.
+    #[serde(rename = "up-to-date")]
     UpToDate,
     /// Updater isn't configured for this build / platform.
     Unsupported,
@@ -79,4 +82,22 @@ pub async fn check_for_update_impl<R: Runtime>(_app: AppHandle<R>) -> UpdateChec
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> UpdateCheckOutcome {
     check_for_update_impl(app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateCheckOutcome;
+
+    /// The status names the frontend matches on (src/core/updater.ts and the
+    /// About dialog).
+    #[test]
+    fn status_names_match_the_frontend() {
+        let status = |o: &UpdateCheckOutcome| serde_json::to_value(o).unwrap()["status"].as_str().unwrap().to_string();
+        assert_eq!(status(&UpdateCheckOutcome::UpToDate), "up-to-date");
+        assert_eq!(status(&UpdateCheckOutcome::Unsupported), "unsupported");
+        assert_eq!(status(&UpdateCheckOutcome::Error { message: "x".into() }), "error");
+        let available = UpdateCheckOutcome::Available { version: "1.2.1".into(), notes: None, date: None };
+        assert_eq!(status(&available), "available");
+        assert_eq!(serde_json::to_value(&available).unwrap()["version"], "1.2.1");
+    }
 }

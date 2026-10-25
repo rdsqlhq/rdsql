@@ -7,6 +7,7 @@ import { safeInvoke } from '../../core/tauri/ipc';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { useAppVersion } from '../../core/hooks/useAppVersion';
+import { OutboundLink } from './OutboundLink';
 
 /** Discriminated result returned by the Rust `check_for_update` command.
  *  Mirrors `UpdateCheckOutcome` in src-tauri/src/commands/updater.rs. */
@@ -154,48 +155,40 @@ export const AboutModal: React.FC = () => {
               helps other people find the project.
             </p>
             <div className="flex flex-wrap items-center gap-2">
-              <a
+              <OutboundLink
                 href="https://github.com/rdsqlhq/rdsql"
-                target="_blank"
-                rel="noreferrer"
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 hover:bg-amber-500/20 text-amber-300 text-xs font-semibold transition-colors"
               >
                 <Star className="w-3.5 h-3.5" />
                 Star on GitHub
-              </a>
-              <a
+              </OutboundLink>
+              <OutboundLink
                 href="https://github.com/sponsors/rdsqlhq"
-                target="_blank"
-                rel="noreferrer"
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-pink-500/10 border border-pink-500/30 hover:bg-pink-500/20 text-pink-300 text-xs font-semibold transition-colors"
               >
                 <Heart className="w-3.5 h-3.5" />
                 Sponsor
-              </a>
+              </OutboundLink>
             </div>
           </div>
 
           {/* Links */}
           <div className="flex flex-wrap items-center gap-2">
-            <a
+            <OutboundLink
               href="https://github.com/rdsqlhq/rdsql"
-              target="_blank"
-              rel="noreferrer"
               className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors"
             >
               <ExternalLink className="w-3 h-3" />
               GitHub
-            </a>
+            </OutboundLink>
             <span className="text-slate-600">·</span>
-            <a
+            <OutboundLink
               href="https://github.com/rdsqlhq/rdsql/issues/new?template=bug_report.yml"
-              target="_blank"
-              rel="noreferrer"
               className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors"
             >
               <Bug className="w-3 h-3" />
               Report Bug
-            </a>
+            </OutboundLink>
             <span className="text-slate-600">·</span>
             <span className="text-xs text-slate-500">com.rdsql.desktop</span>
           </div>

@@ -22,7 +22,7 @@ use duckdb::Connection as DuckdbConn;
 use mysql_async::prelude::*;
 use super::connection::{fetch_schema_tree_impl, normalize_host, ConnectionConfig, SchemaNode};
 use super::error::{from_duckdb, from_mysql, from_postgres, from_sqlite, DbError};
-use super::query::{mysql_opts, mysql_value_to_json};
+use super::query::{mysql_opts, mysql_value_to_json, run_cancellable, QueryRegistry};
 
 /// Row cap for table-data comparison. Comparing unbounded tables can pull
 /// millions of rows into memory; we sample the first chunk and flag the
@@ -448,8 +448,18 @@ fn diff_trees(
     }
 }
 
+/// `operation_id` lets the Stop button cancel it via `cancel_query`.
 #[tauri::command]
 pub async fn compare_schema(
+    source: ConnectionConfig,
+    target: ConnectionConfig,
+    operation_id: Option<String>,
+    registry: tauri::State<'_, QueryRegistry>,
+) -> Result<SchemaDiffResult, String> {
+    run_cancellable(operation_id, &registry, compare_schema_impl(source, target)).await
+}
+
+pub(crate) async fn compare_schema_impl(
     source: ConnectionConfig,
     target: ConnectionConfig,
 ) -> Result<SchemaDiffResult, String> {
@@ -921,8 +931,20 @@ fn qualify_mysql_table(schema: Option<&str>, table: &str) -> String {
     }
 }
 
+/// `operation_id` lets the Stop button cancel it via `cancel_query`.
 #[tauri::command]
 pub async fn compare_table_data(
+    source: ConnectionConfig,
+    target: ConnectionConfig,
+    schema: Option<String>,
+    table: String,
+    operation_id: Option<String>,
+    registry: tauri::State<'_, QueryRegistry>,
+) -> Result<DataDiffResult, String> {
+    run_cancellable(operation_id, &registry, compare_table_data_impl(source, target, schema, table)).await
+}
+
+async fn compare_table_data_impl(
     source: ConnectionConfig,
     target: ConnectionConfig,
     schema: Option<String>,
@@ -1076,8 +1098,18 @@ pub struct SyncScript {
 /// Build the DDL script that would bring `target` into sync with `source`.
 /// Reuses the schema-diff machinery — this is a pure computation step that
 /// never touches either database, so it's safe to call as a preview.
+/// `operation_id` lets the Stop button cancel it via `cancel_query`.
 #[tauri::command]
 pub async fn generate_schema_sync_sql(
+    source: ConnectionConfig,
+    target: ConnectionConfig,
+    operation_id: Option<String>,
+    registry: tauri::State<'_, QueryRegistry>,
+) -> Result<SyncScript, String> {
+    run_cancellable(operation_id, &registry, generate_schema_sync_sql_impl(source, target)).await
+}
+
+async fn generate_schema_sync_sql_impl(
     source: ConnectionConfig,
     target: ConnectionConfig,
 ) -> Result<SyncScript, String> {

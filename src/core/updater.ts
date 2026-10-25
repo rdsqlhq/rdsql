@@ -80,7 +80,12 @@ export async function checkForUpdate(): Promise<{
     return { result: { status: 'unsupported' }, update: null };
   }
   return {
-    result: { status: 'error', error: outcome.message },
+    result: {
+      status: 'error',
+      // An unrecognized status (backend and frontend out of step) used to
+      // show up as a red error with no explanation.
+      error: (outcome as { message?: string }).message || `Unexpected update-check response: ${JSON.stringify(outcome)}`,
+    },
     update: null,
   };
 }

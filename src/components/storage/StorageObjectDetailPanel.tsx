@@ -21,6 +21,7 @@ import { copyToClipboard } from '../../core/utils/clipboard';
 import { formatBytes, formatDateTime, guessContentType } from './format';
 import { FileTypeIcon } from './FileTypeIcon';
 import type { S3ConnectionConfig, StorageObject, ObjectMetadata } from '../../core/storage/domain/types';
+import { OutboundLink } from '../common/OutboundLink';
 
 type DetailTab = 'details' | 'metadata';
 
@@ -321,15 +322,13 @@ export const StorageObjectDetailPanel: React.FC<Props> = ({
             {presignedUrl && (
               <div className="pt-1.5 mt-1.5 border-t border-[#1e293b]">
                 <div className="text-[11.5px] text-slate-500 mb-1">URL</div>
-                <a
+                <OutboundLink
                   href={presignedUrl}
-                  target="_blank"
-                  rel="noreferrer"
                   className="text-[11px] font-mono text-blue-400 hover:text-blue-300 break-all flex items-start gap-1"
                 >
                   <span className="flex-1 break-all">{presignedUrl}</span>
                   <ExternalLink className="w-3 h-3 shrink-0 mt-0.5" />
-                </a>
+                </OutboundLink>
               </div>
             )}
           </div>

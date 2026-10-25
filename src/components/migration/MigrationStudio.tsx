@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeftRight,
   ArrowRight,
@@ -13,6 +13,8 @@ import {
   Table as TableIcon,
   ShieldAlert,
   KeyRound,
+  Square,
+  ArrowDownUp,
 } from 'lucide-react';
 import { useConnectionStore } from '../../store/useConnectionStore';
 import { useToastStore } from '../../store/useToastStore';
@@ -98,6 +100,8 @@ const DbPicker: React.FC<{
   loading: boolean;
   engine: string;
   badge?: React.ReactNode;
+  /** Full-width card layout for the setup screen, instead of one header row. */
+  stacked?: boolean;
 }> = ({
   role,
   connections,
@@ -109,8 +113,64 @@ const DbPicker: React.FC<{
   loading,
   engine,
   badge,
+  stacked,
 }) => {
   const isSource = role === 'source';
+  if (stacked) {
+    const field =
+      'w-full bg-[#0f172a] border border-[#1e293b] rounded-lg text-xs text-slate-200 px-3 py-2 focus:outline-none ' +
+      (isSource ? 'focus:border-cyan-500/50' : 'focus:border-amber-500/50');
+    return (
+      <div
+        className={cn(
+          'flex-1 min-w-0 rounded-xl border bg-[#0a0f18] p-4 space-y-3',
+          isSource ? 'border-cyan-500/25' : 'border-amber-500/25'
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <Database className={cn('w-4 h-4', isSource ? 'text-cyan-400' : 'text-amber-400')} />
+          <span className={cn('text-xs font-bold uppercase tracking-wider', isSource ? 'text-cyan-400' : 'text-amber-400')}>
+            {isSource ? 'Source' : 'Target'}
+          </span>
+          {engine && <span className="ml-auto text-[10px] font-bold text-slate-500 uppercase tracking-wider">{engine}</span>}
+        </div>
+        <p className="text-[11px] text-slate-500 -mt-1">
+          {isSource ? 'Read only. Never written to.' : 'Applying a sync writes changes here.'}
+        </p>
+        <div>
+          <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Connection</label>
+          <select value={connectionId} onChange={(e) => onConnectionChange(e.target.value)} aria-label={`${role} connection`} className={field}>
+            {connections.length === 0 && <option value="">No connections</option>}
+            {connections.map((c) => (
+              <option key={c.id} value={c.id}>
+                {connLabel(c)}
+              </option>
+            ))}
+          </select>
+        </div>
+        {(databases.length > 0 || loading) && (
+          <div>
+            <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+              {engine === 'postgres' ? 'Schema' : 'Database'}
+            </label>
+            {loading ? (
+              <div className="flex items-center gap-2 h-[34px] text-[11px] text-slate-500">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading…
+              </div>
+            ) : (
+              <select value={database} onChange={(e) => onDatabaseChange(e.target.value)} aria-label={`${role} database`} className={field}>
+                {databases.map((db) => (
+                  <option key={db} value={db}>
+                    {db}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
   const select =
     'bg-[#0f172a] border border-[#1e293b] rounded-lg text-[11px] text-slate-200 px-2 py-1 max-w-[190px] focus:outline-none ' +
     (isSource ? 'focus:border-cyan-500/50' : 'focus:border-amber-500/50');
@@ -166,6 +226,71 @@ const DbPicker: React.FC<{
   );
 };
 
+/** First screen of Compare & Sync: both sides side by side with room to read
+ *  them, the direction made obvious, and one clear Compare button. */
+const CompareSetup: React.FC<{
+  source: React.ReactNode;
+  target: React.ReactNode;
+  onSwap: () => void;
+  canCompare: boolean;
+  blockedReason?: string;
+  targetIsProd: boolean;
+  error: string | null;
+  onCompare: () => void;
+}> = ({ source, target, onSwap, canCompare, blockedReason, targetIsProd, error, onCompare }) => (
+  <div className="h-full overflow-y-auto px-6 py-8 flex flex-col">
+    {/* my-auto centers it vertically, and still scrolls when the window is short. */}
+    <div className="max-w-3xl w-full mx-auto my-auto space-y-5">
+      <div className="text-center space-y-1">
+        <h3 className="text-sm font-semibold text-slate-200">Compare two databases</h3>
+        <p className="text-xs text-slate-500">
+          Lists every table side by side and, if you want, generates the SQL that makes the target match the source.
+          Comparing never writes anything.
+        </p>
+      </div>
+
+      <div className="flex flex-col md:flex-row items-stretch gap-3">
+        {source}
+        <div className="flex md:flex-col items-center justify-center gap-2 shrink-0">
+          <ArrowRight className="w-5 h-5 text-cyan-500 rotate-90 md:rotate-0" />
+          <button
+            onClick={onSwap}
+            title="Swap source and target"
+            className="p-1.5 rounded-lg border border-[#1e293b] text-slate-400 hover:text-slate-100 hover:border-slate-600 transition-colors"
+          >
+            <ArrowDownUp className="w-3.5 h-3.5 md:rotate-90" />
+          </button>
+        </div>
+        {target}
+      </div>
+
+      {blockedReason && <Notice tone="warning">{blockedReason}</Notice>}
+      {!blockedReason && targetIsProd && (
+        <Notice tone="danger">
+          The target looks like production. A sync modifies it; you'll have to type its name to confirm.
+        </Notice>
+      )}
+      {error && (
+        <div className="flex items-start gap-2 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg p-3">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span className="font-mono break-all">{error}</span>
+        </div>
+      )}
+
+      <div className="flex justify-center">
+        <button
+          onClick={onCompare}
+          disabled={!canCompare}
+          className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-lg shadow-blue-600/30 transition-all"
+        >
+          <GitCompare className="w-4 h-4" />
+          {error ? 'Try again' : 'Compare'}
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
 const Notice: React.FC<{ tone: 'danger' | 'warning'; children: React.ReactNode }> = ({
   tone,
   children,
@@ -200,6 +325,8 @@ export const MigrationStudio: React.FC = () => {
   const [targetDatabases, setTargetDatabases] = useState<string[]>([]);
   const [targetDbLoading, setTargetDbLoading] = useState(false);
   const [targetDbName, setTargetDbName] = useState('');
+  /** Database to re-select once a side's list reloads (set by Swap). */
+  const preferredDb = useRef<{ source?: string; target?: string }>({});
 
   const source = connections.find((c) => c.id === sourceId);
   const target = connections.find((c) => c.id === targetId);
@@ -232,7 +359,9 @@ export const MigrationStudio: React.FC = () => {
         if (cancelled) return;
         const dbNames = (tree || []).map((g) => g.name);
         setSourceDatabases(dbNames);
-        setSourceDbName(dbNames[0] ?? '');
+        const want = preferredDb.current.source;
+        preferredDb.current.source = undefined;
+        setSourceDbName(want && dbNames.includes(want) ? want : dbNames[0] ?? '');
       } catch {
         if (!cancelled) setSourceDatabases([]);
       } finally {
@@ -262,7 +391,9 @@ export const MigrationStudio: React.FC = () => {
         if (cancelled) return;
         const dbNames = (tree || []).map((g) => g.name);
         setTargetDatabases(dbNames);
-        setTargetDbName(dbNames[0] ?? '');
+        const want = preferredDb.current.target;
+        preferredDb.current.target = undefined;
+        setTargetDbName(want && dbNames.includes(want) ? want : dbNames[0] ?? '');
       } catch {
         if (!cancelled) setTargetDatabases([]);
       } finally {
@@ -281,6 +412,16 @@ export const MigrationStudio: React.FC = () => {
   };
 
   const [tab, setTab] = useState<Tab>('schema');
+
+  /** Id of the compare/generate call in flight, so Stop can cancel it in the
+   *  backend (`cancel_query`). */
+  const opRef = useRef<string | null>(null);
+  const startOp = () => (opRef.current = `compare_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  const stopOp = () => {
+    const id = opRef.current;
+    if (id) void safeInvoke('cancel_query', { queryId: id }).catch(() => {});
+  };
+  const wasStopped = (msg: string) => /cancelled by user/i.test(msg);
 
   // --- schema compare state -------------------------------------------------
   const [schemaDiff, setSchemaDiff] = useState<SchemaDiffResult | null>(null);
@@ -307,6 +448,24 @@ export const MigrationStudio: React.FC = () => {
    *  "Review SQL" escape hatch in the confirmation dialog). */
   const [reviewSignal, setReviewSignal] = useState(0);
 
+  // A result belongs to the pair it was made from: picking another source or
+  // target drops it, so the screen never shows a diff for the wrong pair.
+  useEffect(() => {
+    setSchemaDiff(null);
+    setSchemaError(null);
+    setDataDiff(null);
+    setDataError(null);
+    setSyncScript(null);
+    setSyncError(null);
+    setApplyResult(null);
+  }, [sourceId, targetId, sourceDbName, targetDbName]);
+
+  const swapSides = () => {
+    preferredDb.current = { source: targetDbName, target: sourceDbName };
+    setSourceId(targetId);
+    setTargetId(sourceId);
+  };
+
   // Tables that exist in both DBs (candidates for data compare). Derived from
   // the schema diff when present.
   const commonTables = useMemo(() => {
@@ -329,13 +488,19 @@ export const MigrationStudio: React.FC = () => {
       const res = await safeInvoke<SchemaDiffResult>('compare_schema', {
         source: src,
         target: tgt,
+        operationId: startOp(),
       });
       setSchemaDiff(res);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      setSchemaError(msg);
-      pushToast({ severity: 'error', title: 'Schema compare failed', message: msg });
+      if (wasStopped(msg)) {
+        pushToast({ severity: 'info', title: 'Compare stopped' });
+      } else {
+        setSchemaError(msg);
+        pushToast({ severity: 'error', title: 'Schema compare failed', message: msg });
+      }
     } finally {
+      opRef.current = null;
       setComparingSchema(false);
     }
   };
@@ -357,13 +522,19 @@ export const MigrationStudio: React.FC = () => {
         target: tgt,
         schema,
         table,
+        operationId: startOp(),
       });
       setDataDiff(res);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      setDataError(msg);
-      pushToast({ severity: 'error', title: 'Data compare failed', message: msg });
+      if (wasStopped(msg)) {
+        pushToast({ severity: 'info', title: 'Data compare stopped' });
+      } else {
+        setDataError(msg);
+        pushToast({ severity: 'error', title: 'Data compare failed', message: msg });
+      }
     } finally {
+      opRef.current = null;
       setComparingData(false);
     }
   };
@@ -380,6 +551,7 @@ export const MigrationStudio: React.FC = () => {
       const res = await safeInvoke<SyncScript>('generate_schema_sync_sql', {
         source: src,
         target: tgt,
+        operationId: startOp(),
       });
       setSyncScript(res);
       if (res.warnings.length > 0) {
@@ -391,9 +563,14 @@ export const MigrationStudio: React.FC = () => {
       }
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      setSyncError(msg);
-      pushToast({ severity: 'error', title: 'Sync script generation failed', message: msg });
+      if (wasStopped(msg)) {
+        pushToast({ severity: 'info', title: 'Script generation stopped' });
+      } else {
+        setSyncError(msg);
+        pushToast({ severity: 'error', title: 'Sync script generation failed', message: msg });
+      }
     } finally {
+      opRef.current = null;
       setGeneratingSync(false);
     }
   };
@@ -453,6 +630,9 @@ export const MigrationStudio: React.FC = () => {
 
   const sourceLabel = source ? (sourceDbName || effectiveDatabase(source) || source.name) : '—';
   const targetLabel = target ? (targetDbName || effectiveDatabase(target) || target.name) : '—';
+  /** Nothing compared yet: show the roomy setup card instead of squeezing
+   *  the pickers into the header. */
+  const showSetup = !schemaDiff && !comparingSchema;
   const blockedReason = engineMismatch
     ? `Source is ${sourceEngine} and target is ${targetEngine}. Compare & sync require the same engine on both sides.`
     : sameDb
@@ -473,40 +653,67 @@ export const MigrationStudio: React.FC = () => {
             Compare &amp; Sync
           </h2>
 
-          {/* Source → Target on one line. The direction is the safety model. */}
-          <DbPicker
-            role="source"
-            connections={connections}
-            connectionId={sourceId}
-            onConnectionChange={setSourceId}
-            databases={sourceDatabases}
-            database={sourceDbName}
-            onDatabaseChange={setSourceDbName}
-            loading={sourceDbLoading}
-            engine={sourceEngine}
-          />
+          {/* Source → Target on one line once a compare has run; before that
+              they live in the setup card below, with room to read them. */}
+          {!showSetup && (
+            <>
+              <DbPicker
+                role="source"
+                connections={connections}
+                connectionId={sourceId}
+                onConnectionChange={setSourceId}
+                databases={sourceDatabases}
+                database={sourceDbName}
+                onDatabaseChange={setSourceDbName}
+                loading={sourceDbLoading}
+                engine={sourceEngine}
+              />
 
-          <ArrowRight className="w-4 h-4 text-cyan-500 shrink-0" />
+              <ArrowRight className="w-4 h-4 text-cyan-500 shrink-0" />
 
-          <DbPicker
-            role="target"
-            connections={connections}
-            connectionId={targetId}
-            onConnectionChange={setTargetId}
-            databases={targetDatabases}
-            database={targetDbName}
-            onDatabaseChange={setTargetDbName}
-            loading={targetDbLoading}
-            engine={targetEngine}
-            badge={
-              targetIsProd ? (
-                <span className="flex items-center gap-1 text-[10px] font-bold text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded px-1.5 py-0.5">
-                  <ShieldAlert className="w-3 h-3" />
-                  PROD
-                </span>
-              ) : undefined
-            }
-          />
+              <DbPicker
+                role="target"
+                connections={connections}
+                connectionId={targetId}
+                onConnectionChange={setTargetId}
+                databases={targetDatabases}
+                database={targetDbName}
+                onDatabaseChange={setTargetDbName}
+                loading={targetDbLoading}
+                engine={targetEngine}
+                badge={
+                  targetIsProd ? (
+                    <span className="flex items-center gap-1 text-[10px] font-bold text-rose-400 bg-rose-500/10 border border-rose-500/30 rounded px-1.5 py-0.5">
+                      <ShieldAlert className="w-3 h-3" />
+                      PROD
+                    </span>
+                  ) : undefined
+                }
+              />
+              <button
+                onClick={swapSides}
+                title="Swap source and target"
+                className="p-1 rounded-md text-slate-500 hover:text-slate-200 hover:bg-[#1e293b] transition-colors"
+              >
+                <ArrowLeftRight className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => {
+                  setSchemaDiff(null);
+                  setSchemaError(null);
+                  setSyncScript(null);
+                  setApplyResult(null);
+                  setDataDiff(null);
+                  setTab('schema');
+                }}
+                disabled={comparingSchema || generatingSync || applying}
+                title="Clear this result and pick databases again"
+                className="px-2 py-1 rounded-md border border-[#1e293b] text-[11px] text-slate-400 hover:text-slate-100 hover:border-slate-600 disabled:opacity-40 transition-colors"
+              >
+                New compare
+              </button>
+            </>
+          )}
 
           {/* View switch */}
           <div className="ml-auto flex items-center gap-0.5 bg-[#0a0f18] border border-[#1e293b] rounded-lg p-0.5">
@@ -535,7 +742,7 @@ export const MigrationStudio: React.FC = () => {
         </div>
 
         {/* At most one line of guidance, and only when it matters. */}
-        {engineMismatch ? (
+        {showSetup ? null : engineMismatch ? (
           <Notice tone="danger">
             Both sides must use the same engine. Source is <b>{sourceEngine}</b>, target is{' '}
             <b>{targetEngine}</b>.
@@ -556,7 +763,45 @@ export const MigrationStudio: React.FC = () => {
       {/* Tab content                                                       */}
       {/* ----------------------------------------------------------------- */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {tab === 'schema' && (
+        {tab === 'schema' && showSetup && (
+          <CompareSetup
+            source={
+              <DbPicker
+                role="source"
+                connections={connections}
+                connectionId={sourceId}
+                onConnectionChange={setSourceId}
+                databases={sourceDatabases}
+                database={sourceDbName}
+                onDatabaseChange={setSourceDbName}
+                loading={sourceDbLoading}
+                engine={sourceEngine}
+                stacked
+              />
+            }
+            target={
+              <DbPicker
+                role="target"
+                connections={connections}
+                connectionId={targetId}
+                onConnectionChange={setTargetId}
+                databases={targetDatabases}
+                database={targetDbName}
+                onDatabaseChange={setTargetDbName}
+                loading={targetDbLoading}
+                engine={targetEngine}
+                stacked
+              />
+            }
+            onSwap={swapSides}
+            canCompare={canCompare}
+            blockedReason={blockedReason}
+            targetIsProd={targetIsProd}
+            error={schemaError}
+            onCompare={runSchemaCompare}
+          />
+        )}
+        {tab === 'schema' && !showSetup && (
           <SchemaCompareView
             canCompare={canCompare}
             blockedReason={blockedReason}
@@ -567,6 +812,7 @@ export const MigrationStudio: React.FC = () => {
             targetLabel={targetLabel}
             targetIsProd={targetIsProd}
             onCompare={runSchemaCompare}
+            onStop={stopOp}
             syncScript={syncScript}
             generatingSync={generatingSync}
             syncError={syncError}
@@ -588,6 +834,7 @@ export const MigrationStudio: React.FC = () => {
             selectedTable={dataTable}
             onSelectTable={(t) => setDataTable(t)}
             onCompare={runDataCompare}
+            onStop={stopOp}
             hasSchemaDiff={!!schemaDiff}
           />
           </div>
@@ -712,6 +959,8 @@ interface DataCompareTabProps {
   selectedTable: string;
   onSelectTable: (t: string) => void;
   onCompare: () => void;
+  /** Cancels the running compare. */
+  onStop: () => void;
   hasSchemaDiff: boolean;
 }
 
@@ -724,6 +973,7 @@ const DataCompareTab: React.FC<DataCompareTabProps> = ({
   selectedTable,
   onSelectTable,
   onCompare,
+  onStop,
   hasSchemaDiff,
 }) => {
   if (!canCompare) {
@@ -765,14 +1015,25 @@ const DataCompareTab: React.FC<DataCompareTabProps> = ({
           </div>
         )}
 
-        <button
-          onClick={onCompare}
-          disabled={comparing || !selectedTable}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold shadow-lg shadow-blue-600/30 transition-all"
-        >
-          {comparing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          {comparing ? 'Comparing…' : 'Compare Data'}
-        </button>
+        {comparing ? (
+          <button
+            onClick={onStop}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-all"
+            title="Stop comparing"
+          >
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Stop
+          </button>
+        ) : (
+          <button
+            onClick={onCompare}
+            disabled={!selectedTable}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold shadow-lg shadow-blue-600/30 transition-all"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Compare Data
+          </button>
+        )}
       </div>
 
       {error && <ErrorBanner message={error} />}

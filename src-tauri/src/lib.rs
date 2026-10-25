@@ -375,6 +375,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::external::open_external_url,
             commands::connection::test_connection,
             commands::connection::fetch_schema_tree,
             commands::ssh_tunnel::test_ssh_connection,
