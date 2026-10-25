@@ -26,9 +26,9 @@ self-built copy from silently calling production; actual access control is per-u
 ## Build / release
 
 Everything's driven from the `Makefile` (`make help`). Releasing is tag-driven via
-`.github/workflows/release.yml` — see `RELEASE.md` for the full process. Signing (Tauri updater
-key, Apple code signing/notarization) needs credentials that don't exist yet; see `RELEASE.md`
-and the `NEEDS REVIEW` note there for current status. Builds and tests do not require any signing
+`.github/workflows/release.yml` — see `RELEASE.md` for the full process. The Tauri updater key is
+set up (GitHub Secrets) and in-app updates work; Apple code signing/notarization still needs
+credentials that don't exist yet (see `RELEASE.md`). Builds and tests do not require any signing
 credentials.
 
 ## Known gotchas

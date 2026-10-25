@@ -3,7 +3,7 @@
 All notable changes to rdSQL Desktop are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.3.0] - 2026-10-25
 
 ### Added
 - Restore runs `pg_dump` and `mysqldump` / `mariadb-dump` scripts: `COPY ... FROM stdin`
@@ -13,6 +13,9 @@ All notable changes to rdSQL Desktop are documented here. Format loosely follows
 - Restore reads the file a few megabytes at a time, so dumps of any size can be run.
   Statements run in the file's own order; progress follows the bytes read.
 - Backup & Restore tutorial (`docs/tutorials/backup-restore.md`).
+- Compare & Sync: Stop buttons while comparing schemas, comparing row data and
+  generating the sync script (cancelled in the backend). Before the first compare, source
+  and target sit in a setup card with a swap button; afterwards **New compare** goes back.
 - PostgreSQL / Neon backups copy every index, UNIQUE / CHECK / EXCLUDE constraint and
   foreign key, created after the data as pg_dump does (a foreign key when the table it
   references is copied too). Re-running a backup into the same target skips the ones
@@ -24,6 +27,10 @@ All notable changes to rdSQL Desktop are documented here. Format loosely follows
   ~470k-row backup into Neon went from about 130 s to under 30 s, index builds included.
 
 ### Fixed
+- Check for Updates showed a red "Could not check for updates" when already up to date
+  (the backend reported `upToDate`, the app expected `up-to-date`).
+- Star on GitHub, Sponsor, GitHub and Report Bug in About, the AI-key link in Settings and
+  the S3 file-URL links did nothing when clicked; they open in the browser now.
 - The data grid showed NULL for PostgreSQL interval, inet, cidr, macaddr, bit, varbit,
   timetz and money values (and arrays of them); they now read as Postgres shows them.
 

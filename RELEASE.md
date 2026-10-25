@@ -94,18 +94,10 @@ The endpoint is:
 https://github.com/rdsqlhq/rdsql/releases/latest/download/latest.json
 ```
 
-> ### NEEDS REVIEW — endpoint points at this (now public) repo
->
-> This used to point at a private repo (`robiokidenis/rdsql-desktop`, then
-> `rdsqlhq/rdsql-desktop`), and GitHub doesn't serve release *assets*
-> anonymously on private repos — anonymous requests 404'd regardless of the
-> repo owner, so the in-app updater couldn't actually reach it. Now that this
-> code lives in the public `rdsqlhq/rdsql`, that specific problem goes away
-> **once releases actually exist here** — but nobody has verified it in
-> practice yet, and the `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` GitHub
-> Secrets below still need to be set on *this* repo (they don't carry over
-> from the private one). Treat auto-update as unverified until a real tagged
-> release has been published and tested end-to-end.
+Verified with v1.2.0: once the release was published, this URL served
+`latest.json` for 1.2.0 with a signed download for every platform, and the
+`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` secrets are set on this repo.
+Releases stay invisible to the updater while they're drafts.
 
 ### Signing
 
