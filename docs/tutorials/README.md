@@ -7,6 +7,7 @@
 - [Connect to SQLite / DuckDB / Cloudflare D1](connect-sqlite.md)
 - [The SQL Editor](sql-editor.md)
 - [Database Explorer](database-explorer.md)
+- [Backup & Restore](backup-restore.md)
 - [Visual ERD Studio](erd.md)
 - [S3 Object Storage Browser](s3.md)
 - [AI Assistant](ai.md)

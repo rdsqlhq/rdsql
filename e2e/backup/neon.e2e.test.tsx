@@ -9,6 +9,7 @@
 // the database in the URL is only used to run CREATE/DROP DATABASE.
 import { afterAll, describe, expect, test } from 'vitest';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { parseConnectionUrl } from '../../src/core/connection/envImport';
@@ -35,8 +36,10 @@ function neon(database: string): DatabaseConnection {
 }
 
 function expectClean(r: RunResult) {
-  // Neon never grants superuser, so the FK-check toggle is always refused.
-  const real = r.errors.filter((e) => !/session_replication_role/.test(e));
+  // Neon never grants superuser, so the FK-check toggle is always refused;
+  // and pg_dump's CREATE SCHEMA public meets the schema every database has.
+  // The restore notes both and carries on.
+  const real = r.errors.filter((e) => !/session_replication_role/.test(e) && !/:: CREATE SCHEMA public;$/.test(e));
   if (r.status !== 'done' || real.length) console.log(r.log.split('\n').slice(-30).join('\n'), real.slice(0, 5));
   expect(real).toEqual([]);
   expect(r.status).toBe('done');
@@ -67,6 +70,22 @@ describe.runIf(!!url)('postgres → neon', () => {
     expect(await fingerprint(target, 'public')).toEqual(await fingerprint(source, 'public'));
     const c = await query(target, `INSERT INTO customers (email, "fullName") VALUES ('new@example.com', 'New') RETURNING id`);
     expect(c.rows[0][0]).toBe(20001);
+  });
+
+  test('restore a plain pg_dump (owners and grants kept) into Neon', async () => {
+    // A default pg_dump: OWNER TO / GRANT name roles Neon doesn't have, and
+    // Neon never grants superuser. Those are skipped; everything else lands.
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rdsql-e2e-neon-')), 'pg_dump.sql');
+    const out = execFileSync(
+      'docker',
+      ['compose', '-f', path.join(__dirname, 'docker-compose.yml'), 'exec', '-T', 'pg-dst', 'env', 'PGPASSWORD=rdsql_dev_pw', 'pg_dump', '-h', 'pg-src', '-U', 'rdsql', '-n', 'public', 'rdsql_src'],
+      { maxBuffer: 1 << 30 }
+    );
+    fs.writeFileSync(file, out);
+    await fresh();
+    const target = neon(SCRATCH);
+    expectClean(await runRestore({ target, file }));
+    expect(await fingerprint(target, 'public')).toEqual(await fingerprint(conn(servers.pgSrc), 'public'));
   });
 
   test('restore a backup file into Neon', async () => {

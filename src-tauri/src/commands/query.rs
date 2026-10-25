@@ -315,17 +315,134 @@ fn pg_cell_to_json(row: &tokio_postgres::Row, idx: usize, ty: &PgType) -> serde_
             v.map(|b| json!(format!("<{} bytes>", b.len())))
                 .unwrap_or(serde_json::Value::Null)
         }
-        // Everything else genuinely text-shaped (text, varchar, bpchar, name)
-        // converts cleanly to String. Types with their own binary wire
-        // format that also need `Option<String>` here (interval, inet, and
-        // anything else not covered above) will hit the same accepts()
-        // failure as the ones fixed above — add an explicit arm using the
-        // right FromSql target if one of those turns out to matter too.
+        // Text-shaped types (text, varchar, bpchar, name) read as String.
+        // Anything else arrives in its binary wire form: the types below are
+        // decoded into the same text Postgres prints (pg_binary_to_text);
+        // before, every one of them showed as NULL.
         _ => {
-            let v: Option<String> = row.try_get(idx).ok().flatten();
-            v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null)
+            if let Ok(v) = row.try_get::<_, Option<String>>(idx) {
+                return v.map(|s| json!(s)).unwrap_or(serde_json::Value::Null);
+            }
+            let v: Option<RawBytes> = row.try_get(idx).ok().flatten();
+            v.map(|b| json!(pg_binary_to_text(ty, &b.0))).unwrap_or(serde_json::Value::Null)
         }
     }
+}
+
+/// A Postgres value's raw wire bytes, whatever its type.
+struct RawBytes(Vec<u8>);
+impl<'a> FromSql<'a> for RawBytes {
+    fn from_sql(_ty: &PgType, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(RawBytes(raw.to_vec()))
+    }
+    fn accepts(_ty: &PgType) -> bool {
+        true
+    }
+}
+
+/// Postgres' text form of a value the driver hands over in binary: interval,
+/// inet/cidr, macaddr, bit/varbit, timetz and money are decoded here.
+/// Extension types whose binary form is their text (citext, for one) are
+/// shown as that text; anything else as a `(typename)` placeholder, so it
+/// can't be mistaken for NULL.
+fn pg_binary_to_text(ty: &PgType, raw: &[u8]) -> String {
+    let decoded = match *ty {
+        PgType::INTERVAL => pg_interval_text(raw),
+        PgType::INET | PgType::CIDR => pg_inet_text(raw, *ty == PgType::CIDR),
+        PgType::MACADDR | PgType::MACADDR8 => Some(raw.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(":")),
+        PgType::BIT | PgType::VARBIT => pg_bits_text(raw),
+        PgType::TIMETZ => pg_timetz_text(raw),
+        PgType::MONEY => raw.try_into().ok().map(|b: [u8; 8]| pg_money_text(i64::from_be_bytes(b))),
+        _ => std::str::from_utf8(raw).ok().filter(|t| !t.chars().any(|c| c.is_control() && !c.is_whitespace())).map(str::to_string),
+    };
+    decoded.unwrap_or_else(|| format!("({})", ty.name()))
+}
+
+fn be_i64(b: &[u8]) -> Option<i64> {
+    Some(i64::from_be_bytes(b.get(..8)?.try_into().ok()?))
+}
+fn be_i32(b: &[u8]) -> Option<i32> {
+    Some(i32::from_be_bytes(b.get(..4)?.try_into().ok()?))
+}
+
+/// `HH:MM:SS[.ffffff]` for a non-negative time of day / duration in µs.
+fn hms(micros: i64) -> String {
+    let (secs, frac) = (micros / 1_000_000, micros % 1_000_000);
+    let mut out = format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60);
+    if frac != 0 {
+        out.push_str(format!(".{:06}", frac).trim_end_matches('0'));
+    }
+    out
+}
+
+/// interval: 8-byte µs, 4-byte days, 4-byte months, printed in Postgres'
+/// default IntervalStyle, e.g. `1 year 2 mons 3 days 04:05:06.5`.
+fn pg_interval_text(raw: &[u8]) -> Option<String> {
+    let micros = be_i64(raw)?;
+    let days = be_i32(raw.get(8..)?)? as i64;
+    let months = be_i32(raw.get(12..)?)? as i64;
+    let mut parts: Vec<String> = Vec::new();
+    // A field after a negative one gets an explicit "+", as Postgres does.
+    let mut prev_negative = false;
+    let mut field = |value: i64, unit: &str, plural: &str, parts: &mut Vec<String>| {
+        if value != 0 {
+            let sign = if value > 0 && prev_negative { "+" } else { "" };
+            // Singular only for exactly 1: Postgres prints "-1 days".
+            parts.push(format!("{}{} {}", sign, value, if value == 1 { unit } else { plural }));
+            prev_negative = value < 0;
+        }
+    };
+    field(months / 12, "year", "years", &mut parts);
+    field(months % 12, "mon", "mons", &mut parts);
+    field(days, "day", "days", &mut parts);
+    if micros != 0 || parts.is_empty() {
+        let sign = if micros < 0 { "-" } else if prev_negative { "+" } else { "" };
+        parts.push(format!("{}{}", sign, hms(micros.abs())));
+    }
+    Some(parts.join(" "))
+}
+
+/// inet/cidr: family, prefix bits, is-cidr flag, address length, address.
+/// inet leaves out a full-length prefix (`10.0.0.1`); cidr always shows it.
+fn pg_inet_text(raw: &[u8], cidr: bool) -> Option<String> {
+    let (family, bits, len) = (*raw.first()?, *raw.get(1)?, *raw.get(3)? as usize);
+    let addr = raw.get(4..4 + len)?;
+    let (text, max) = match family {
+        2 => (std::net::Ipv4Addr::from(<[u8; 4]>::try_from(addr).ok()?).to_string(), 32),
+        3 => (std::net::Ipv6Addr::from(<[u8; 16]>::try_from(addr).ok()?).to_string(), 128),
+        _ => return None,
+    };
+    Some(if cidr || bits != max { format!("{}/{}", text, bits) } else { text })
+}
+
+/// bit/varbit: 4-byte bit count, then the bits packed high-first.
+fn pg_bits_text(raw: &[u8]) -> Option<String> {
+    let count = be_i32(raw)? as usize;
+    let bytes = raw.get(4..)?;
+    (0..count).map(|i| bytes.get(i / 8).map(|b| if b & (0x80 >> (i % 8)) != 0 { '1' } else { '0' })).collect()
+}
+
+/// timetz: 8-byte µs since midnight, 4-byte offset in seconds *west* of UTC.
+fn pg_timetz_text(raw: &[u8]) -> Option<String> {
+    let micros = be_i64(raw)?;
+    let east = -(be_i32(raw.get(8..)?)? as i64);
+    let (sign, off) = if east < 0 { ('-', -east) } else { ('+', east) };
+    let mut zone = format!("{}{:02}", sign, off / 3600);
+    if off % 3600 != 0 {
+        zone.push_str(&format!(":{:02}", (off / 60) % 60));
+    }
+    if off % 60 != 0 {
+        zone.push_str(&format!(":{:02}", off % 60));
+    }
+    Some(format!("{}{}", hms(micros), zone))
+}
+
+/// money: an 8-byte count of cents. Shown as a plain amount (`-3.50`), since
+/// the currency symbol depends on the server's lc_monetary.
+fn pg_money_text(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    format!("{}{}.{:02}", sign, abs / 100, abs % 100)
 }
 
 /// Convert a PostgreSQL array cell to a JSON array, dispatching on the
@@ -367,7 +484,13 @@ fn pg_array_to_json(row: &tokio_postgres::Row, idx: usize, elem_ty: &PgType) -> 
         // text/varchar/bpchar/name, and everything else genuinely text-shaped
         // on the wire (numeric, uuid, timestamp, date, time, interval, inet) —
         // same fallback `pg_cell_to_json`'s default arm uses for these.
-        _ => to_json(row.try_get::<_, Option<Vec<Option<String>>>>(idx).ok().flatten(), |s| json!(s)),
+        _ => match row.try_get::<_, Option<Vec<Option<String>>>>(idx) {
+            Ok(v) => to_json(v, |s| json!(s)),
+            // Arrays of the binary-only types above (inet[], interval[], …).
+            Err(_) => to_json(row.try_get::<_, Option<Vec<Option<RawBytes>>>>(idx).ok().flatten(), |b| {
+                json!(pg_binary_to_text(elem_ty, &b.0))
+            }),
+        },
     }
 }
 
@@ -745,6 +868,22 @@ impl Session {
         }
     }
 
+    /// Loads `data` (COPY text format, one row per line) through a
+    /// `COPY ... FROM stdin` statement. Postgres sessions only: this is how
+    /// a pg_dump file carries its rows.
+    pub(crate) async fn copy_in(&mut self, sql: &str, data: &str) -> Result<u64, String> {
+        let Session::Postgres(client) = self else {
+            return Err(DbError::app("COPY ... FROM stdin is only supported on PostgreSQL connections.").to_json_string());
+        };
+        let sink = client.copy_in(sql).await.map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+        futures_util::pin_mut!(sink);
+        use futures_util::SinkExt;
+        sink.send(bytes::Bytes::copy_from_slice(data.as_bytes()))
+            .await
+            .map_err(|e| from_postgres(e, Some(sql)).to_json_string())?;
+        sink.as_mut().finish().await.map_err(|e| from_postgres(e, Some(sql)).to_json_string())
+    }
+
     pub(crate) async fn close(self) {
         if let Session::Mysql { pool, conn } = self {
             drop(conn);
@@ -975,6 +1114,22 @@ pub async fn session_execute(
     result
 }
 
+/// Runs one `COPY ... FROM stdin` with its rows on an open session (see
+/// `Session::copy_in`). Returns the number of rows loaded.
+#[tauri::command]
+pub async fn session_copy_in(
+    session_id: String,
+    sql: String,
+    data: String,
+    sessions: tauri::State<'_, SessionRegistry>,
+) -> Result<u64, String> {
+    let session = sessions.0.lock().await.get(&session_id).cloned().ok_or_else(|| {
+        DbError::connection("The database session has ended. Start the operation again.").to_json_string()
+    })?;
+    let mut guard = session.lock().await;
+    guard.copy_in(sql.trim(), &data).await
+}
+
 #[tauri::command]
 pub async fn session_close(session_id: String, sessions: tauri::State<'_, SessionRegistry>) -> Result<(), String> {
     close_session(&sessions, &session_id).await;
@@ -1015,6 +1170,46 @@ mod tests {
             // Without an id it just runs.
             assert_eq!(run_cancellable(None, &registry, async { Ok::<_, String>(7) }).await, Ok(7));
         });
+    }
+
+    fn interval(micros: i64, days: i32, months: i32) -> String {
+        let mut raw = micros.to_be_bytes().to_vec();
+        raw.extend(days.to_be_bytes());
+        raw.extend(months.to_be_bytes());
+        pg_interval_text(&raw).unwrap()
+    }
+
+    /// Expected strings are what Postgres prints for the same values.
+    #[test]
+    fn decodes_binary_only_types_like_postgres_prints_them() {
+        assert_eq!(interval(1_250_000, 1, 12), "1 year 1 day 00:00:01.25");
+        assert_eq!(interval(0, 3, 0), "3 days");
+        assert_eq!(interval(0, 0, 0), "00:00:00");
+        assert_eq!(interval(14_706_000_000, 3, 14), "1 year 2 mons 3 days 04:05:06");
+        assert_eq!(interval(7_200_000_000, -1, 0), "-1 days +02:00:00");
+        assert_eq!(interval(-5_000_000, 0, 0), "-00:00:05");
+
+        assert_eq!(pg_inet_text(&[2, 32, 0, 4, 10, 1, 0, 1], false).unwrap(), "10.1.0.1");
+        assert_eq!(pg_inet_text(&[2, 24, 0, 4, 10, 1, 0, 0], false).unwrap(), "10.1.0.0/24");
+        assert_eq!(pg_inet_text(&[2, 16, 1, 4, 10, 1, 0, 0], true).unwrap(), "10.1.0.0/16");
+        let mut v6 = vec![3, 128, 0, 16];
+        v6.extend(std::net::Ipv6Addr::LOCALHOST.octets());
+        assert_eq!(pg_inet_text(&v6, false).unwrap(), "::1");
+
+        assert_eq!(pg_bits_text(&[0, 0, 0, 4, 0b0101_0000]).unwrap(), "0101");
+        assert_eq!(pg_bits_text(&[0, 0, 0, 10, 0xff, 0b0100_0000]).unwrap(), "1111111101");
+
+        let mut tz = (86_399_500_000i64).to_be_bytes().to_vec();
+        tz.extend((-7 * 3600i32).to_be_bytes());
+        assert_eq!(pg_timetz_text(&tz).unwrap(), "23:59:59.5+07");
+        let mut tz2 = (0i64).to_be_bytes().to_vec();
+        tz2.extend((5 * 3600 + 30 * 60i32).to_be_bytes());
+        assert_eq!(pg_timetz_text(&tz2).unwrap(), "00:00:00-05:30");
+
+        assert_eq!(pg_money_text(350), "3.50");
+        assert_eq!(pg_money_text(-5), "-0.05");
+        assert_eq!(pg_binary_to_text(&PgType::MACADDR, &[8, 0, 0x2b, 1, 2, 3]), "08:00:2b:01:02:03");
+        assert_eq!(pg_binary_to_text(&PgType::POINT, &[0, 1, 2]), "(point)");
     }
 
     fn sqlite_config(path: &str) -> ConnectionConfig {

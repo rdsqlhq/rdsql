@@ -3,6 +3,21 @@
 All notable changes to rdSQL Desktop are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- Restore runs `pg_dump` and `mysqldump` / `mariadb-dump` scripts: `COPY ... FROM stdin`
+  data is loaded with COPY, psql commands such as `\restrict` are skipped, binary
+  values that mysqldump writes as raw bytes keep their exact bytes, and `OWNER TO` /
+  `GRANT` / `REVOKE` for roles from the source server can be skipped (on by default).
+- Restore reads the file a few megabytes at a time, so dumps of any size can be run.
+  Statements run in the file's own order; progress follows the bytes read.
+- Backup & Restore tutorial (`docs/tutorials/backup-restore.md`).
+
+### Fixed
+- The data grid showed NULL for PostgreSQL interval, inet, cidr, macaddr, bit, varbit,
+  timetz and money values (and arrays of them); they now read as Postgres shows them.
+
 ## [1.2.0] - 2026-10-25
 
 ### Added

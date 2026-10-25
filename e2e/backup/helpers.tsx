@@ -180,7 +180,7 @@ export async function runRestore(opts: { target: DatabaseConnection; file: strin
   try {
     dialogState.path = opts.file;
     await act(async () => button(el, 'Choose a .sql file').click());
-    await waitFor(el, () => /statements? found/.test(el.textContent || ''), 60_000, 'the file to load');
+    await waitFor(el, () => /(backup|script) · [\d.]+ (B|KB|MB|GB)/.test(el.textContent || ''), 60_000, 'the file to load');
     await act(async () => button(el, 'Run Restore').click());
     await waitFor(el, () => /Done|Completed with errors|Paused/.test(el.textContent || '') && !/Processing|Importing|Creating/.test(el.textContent || ''), 25 * 60_000, 'the restore to finish');
     const status = /Restore complete/.test(el.textContent || '') ? 'done' : 'failed';
